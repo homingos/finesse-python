@@ -60,6 +60,7 @@ class _Config:
         self.base_url = base.rstrip("/")
         self.timeout = timeout
         self.max_retries = max_retries
+        self.server = _ServerState()
         self.headers: Dict[str, str] = {
             "X-API-Key": api_key,
             "User-Agent": f"{CLIENT_NAME} python/{platform.python_version()}",
@@ -94,18 +95,41 @@ def unwrap(response: httpx.Response) -> Any:
     return body
 
 
-def _idempotency(config: _Config, method: str, idempotent: bool) -> tuple[Mapping[str, str], str]:
-    """Headers for a request, and the method to apply the retry policy for.
+class _ServerState:
+    """What this client has learned about the server, shared by its ``with_options`` copies."""
 
-    An idempotent call carries one Idempotency-Key for all of its attempts (yours, if you
-    passed one in ``extra_headers``), so the server runs it at most once and every failure can
-    be retried like a read.
+    def __init__(self) -> None:
+        self.honours_idempotency_keys = False
+
+
+def _idempotency(
+    config: _Config, method: str, idempotent: bool
+) -> tuple[Mapping[str, str], Optional[str]]:
+    """Headers for a request, and its Idempotency-Key (``None`` when it has none).
+
+    An idempotent call carries one key for all of its attempts (yours, if you passed one in
+    ``extra_headers``), so a server that honours keys runs it at most once.
     """
     if not idempotent or method != "POST":
-        return config.headers, method
-    if any(k.lower() == "idempotency-key" for k in config.headers):
-        return config.headers, "GET"
-    return {**config.headers, "Idempotency-Key": str(uuid.uuid4())}, "GET"
+        return config.headers, None
+    for k, v in config.headers.items():
+        if k.lower() == "idempotency-key":
+            return config.headers, v
+    key = str(uuid.uuid4())
+    return {**config.headers, "Idempotency-Key": key}, key
+
+
+def _retry_policy(
+    config: _Config, method: str, key: Optional[str], response: Optional[httpx.Response]
+) -> str:
+    """The method whose retry rules apply. A keyed POST is retried like a read, but only once
+    the server has shown it honours keys by echoing one back; until then (an older server)
+    it keeps the cautious POST rules, so nothing can run twice."""
+    if key is None:
+        return method
+    if response is not None and response.headers.get("Idempotency-Key") == key:
+        config.server.honours_idempotency_keys = True
+    return "GET" if config.server.honours_idempotency_keys else method
 
 
 def _in_progress(response: httpx.Response) -> bool:
@@ -208,7 +232,7 @@ class SyncHTTP:
 
         With ``stream=True`` the caller must close the returned response.
         """
-        headers, retry_as = _idempotency(self.config, method, idempotent)
+        headers, key = _idempotency(self.config, method, idempotent)
         attempt = 0
         in_progress_until: Optional[float] = None
         while True:
@@ -226,13 +250,16 @@ class SyncHTTP:
                 started = time.monotonic()
                 response = self.client.send(request, stream=stream)
                 _log_response(request, response, started, attempt)
+                _retry_policy(self.config, method, key, response)  # learn whether keys are honoured
                 if response.status_code >= 400 and stream:
                     try:
                         response.read()
                     finally:
                         response.close()
             except httpx.TransportError as exc:
-                if attempt < self.config.max_retries and _should_retry_error(retry_as, exc):
+                if attempt < self.config.max_retries and _should_retry_error(
+                    _retry_policy(self.config, method, key, None), exc
+                ):
                     delay = _retry_delay(attempt, None)
                     _log_retry(request, delay, attempt, type(exc).__name__)
                     time.sleep(delay)
@@ -244,7 +271,7 @@ class SyncHTTP:
                 if self.on_response is not None:
                     self.on_response(response)
                 return response
-            if idempotent and _in_progress(response):
+            if key is not None and _in_progress(response):
                 # The first attempt is still running on the server: wait for it, for
                 # as long as a single request may take, without spending a retry.
                 if in_progress_until is None:
@@ -255,7 +282,7 @@ class SyncHTTP:
                     time.sleep(delay)
                     continue
             if attempt < self.config.max_retries and _should_retry_status(
-                retry_as, response.status_code
+                _retry_policy(self.config, method, key, response), response.status_code
             ):
                 delay = _retry_delay(attempt, response)
                 _log_retry(request, delay, attempt, f"HTTP {response.status_code}")
@@ -308,7 +335,7 @@ class AsyncHTTP:
         stream: bool = False,
         idempotent: bool = False,
     ) -> httpx.Response:
-        headers, retry_as = _idempotency(self.config, method, idempotent)
+        headers, key = _idempotency(self.config, method, idempotent)
         attempt = 0
         in_progress_until: Optional[float] = None
         while True:
@@ -326,13 +353,16 @@ class AsyncHTTP:
                 started = time.monotonic()
                 response = await self.client.send(request, stream=stream)
                 _log_response(request, response, started, attempt)
+                _retry_policy(self.config, method, key, response)  # learn whether keys are honoured
                 if response.status_code >= 400 and stream:
                     try:
                         await response.aread()
                     finally:
                         await response.aclose()
             except httpx.TransportError as exc:
-                if attempt < self.config.max_retries and _should_retry_error(retry_as, exc):
+                if attempt < self.config.max_retries and _should_retry_error(
+                    _retry_policy(self.config, method, key, None), exc
+                ):
                     delay = _retry_delay(attempt, None)
                     _log_retry(request, delay, attempt, type(exc).__name__)
                     await asyncio.sleep(delay)
@@ -344,7 +374,7 @@ class AsyncHTTP:
                 if self.on_response is not None:
                     self.on_response(response)
                 return response
-            if idempotent and _in_progress(response):
+            if key is not None and _in_progress(response):
                 # The first attempt is still running on the server: wait for it, for
                 # as long as a single request may take, without spending a retry.
                 if in_progress_until is None:
@@ -355,7 +385,7 @@ class AsyncHTTP:
                     await asyncio.sleep(delay)
                     continue
             if attempt < self.config.max_retries and _should_retry_status(
-                retry_as, response.status_code
+                _retry_policy(self.config, method, key, response), response.status_code
             ):
                 delay = _retry_delay(attempt, response)
                 _log_retry(request, delay, attempt, f"HTTP {response.status_code}")

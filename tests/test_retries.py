@@ -79,13 +79,25 @@ def test_unkeyed_post_not_retried_when_server_may_have_worked(make_client) -> No
     assert "Idempotency-Key" not in rec.requests[0].headers
 
 
+def echo(resp: httpx.Response) -> object:
+    """A response from a server that honours keys: it echoes the request's key."""
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        key = request.headers.get("Idempotency-Key")
+        if key:
+            resp.headers["Idempotency-Key"] = key
+        return resp
+
+    return respond
+
+
 def test_keyed_posts_retry_with_one_key(make_client) -> None:
     ok = httpx.Response(200, content=b"RIFF")
-    client, rec = make_client(error(500, "boom"), httpx.ReadTimeout("slow"), ok)
+    client, rec = make_client(echo(error(500, "boom")), httpx.ReadTimeout("slow"), ok)
     client.speech.create(voice_id=VOICE["id"], text="hi")
     keys = [r.headers.get("Idempotency-Key") for r in rec.requests]
     assert len(keys) == 3 and keys[0] and len(set(keys)) == 1
-    client2, rec2 = make_client(error(504, "gw"), envelope(VOICE, 201))
+    client2, rec2 = make_client(echo(error(504, "gw")), envelope(VOICE, 201))
     client2.voices.create(name="x")
     assert len(rec2.requests) == 2
     # A new call gets a new key.
@@ -122,6 +134,7 @@ def test_waits_while_the_first_attempt_runs(make_client) -> None:
     # More in-progress answers than max_retries: waiting must not spend retries.
     # After three waits a 503 must still be retried.
     client, rec = make_client(
+        echo(envelope(VOICE, 201)),  # an earlier call taught the client keys are honoured
         httpx.ReadTimeout("slow"),
         in_progress(),
         in_progress(),
@@ -129,8 +142,10 @@ def test_waits_while_the_first_attempt_runs(make_client) -> None:
         error(503, "busy"),
         envelope(VOICE, 201),
     )
+    client.voices.create(name="first")
     client.voices.create(name="x")
-    assert len(rec.requests) == 6
+    assert len(rec.requests) == 7
+    rec.requests.pop(0)
     assert len({r.headers["Idempotency-Key"] for r in rec.requests}) == 1
 
 
@@ -207,6 +222,31 @@ def test_timeouts() -> None:
 
 
 async def test_async_keyed_retry(make_async_client) -> None:
-    client, rec = make_async_client(error(500, "x"), in_progress(), envelope(VOICE, 201))
+    client, rec = make_async_client(echo(error(500, "x")), in_progress(), envelope(VOICE, 201))
     await client.voices.create(name="x")
     assert len(rec.requests) == 3 and len({r.headers["Idempotency-Key"] for r in rec.requests}) == 1
+
+
+def test_older_server_keeps_cautious_retries(make_client) -> None:
+    # A server that does not echo keys (prod before the idempotency change) may run a
+    # retried POST twice, so the SDK only retries when the server certainly did no work.
+    client, rec = make_client(error(500, "boom"))
+    with pytest.raises(ff.InternalServerError):
+        client.speech.create(voice_id=VOICE["id"], text="hi")
+    assert len(rec.requests) == 1
+    client, rec = make_client(httpx.ReadTimeout("slow"))
+    with pytest.raises(ff.APITimeoutError):
+        client.voices.create(name="x")
+    assert len(rec.requests) == 1
+    client, rec = make_client(error(502, "warming"), httpx.Response(200, content=b"RIFF"))
+    client.speech.create(voice_id=VOICE["id"], text="hi")
+    assert len(rec.requests) == 2  # 502: the server did no work, safe either way
+
+
+def test_echo_unlocks_retries_for_the_whole_client(make_client) -> None:
+    client, rec = make_client(
+        echo(envelope(VOICE, 201)), httpx.ReadTimeout("slow"), envelope(VOICE, 201)
+    )
+    client.voices.create(name="a")  # the server echoes: keys are honoured
+    client.with_options(timeout=5.0).voices.create(name="b")  # copies share what was learned
+    assert len(rec.requests) == 3
