@@ -55,7 +55,7 @@ def test_upload_retried_with_same_bytes(make_client, tmp_path) -> None:
     result = {"voice": VOICE, "job_id": "6660aa00bb11cc22dd33ee44"}
     client, rec = make_client(error(503, "busy"), envelope(result, 202))
     with clip.open("rb") as f:
-        client.voices.clone(name="Ana", file=f)
+        client.voices.clone(name="Ana", consent=True, file=f)
     assert b"RIFFdata" in rec.requests[0].content
     assert b"RIFFdata" in rec.requests[1].content
 

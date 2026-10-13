@@ -36,6 +36,7 @@ realtime to voice agents, with a few lines of code.
 - [Text to speech](#text-to-speech)
 - [Streaming speech](#streaming-speech)
 - [Realtime](#realtime)
+- [Short-lived tokens](#short-lived-tokens)
 - [Async usage](#async-usage)
 - [Which method should I use?](#which-method-should-i-use)
 - [Audio formats](#audio-formats)
@@ -120,13 +121,16 @@ A voice can speak once `voice.status == "ready"` (`voice.is_ready`). Its `alias`
 
 ## Clone a voice
 
-Upload a clean reference clip (a few seconds to a minute of one speaker, at most 20 MiB) and wait
-for the voice to be ready:
+Upload a clean reference clip of one speaker (10-30 seconds of clear speech works best; at least
+10 seconds, at most 20 MiB) and wait for the voice to be ready. Cloning requires `consent=True`:
+you attest that you are the speaker or hold their explicit permission to clone their voice, and
+the attestation is recorded on the voice.
 
 ```python
 voice = client.voices.clone_and_wait(
     name="Ana",
     file="reference.wav",  # a path, bytes, a binary file, or (filename, bytes, type)
+    consent=True,
     language="en",
     labels={"gender": "female", "accent": "british"},
     ref_text="What the speaker says in the clip, if you have it.",
@@ -141,13 +145,14 @@ The first clone after the cloner has been idle can take a couple of minutes. To 
 now and wait later:
 
 ```python
-clone = client.voices.clone(name="Ana", file="reference.wav")
+clone = client.voices.clone(name="Ana", file="reference.wav", consent=True)
 print(clone.voice.status, clone.job_id)  # "processing", "6660aa00..."
 voice = client.voices.wait_until_ready(clone, timeout=300)
 ```
 
 Cloning raises `CloneFailedError` if the job fails and `CloneTimeoutError` if it doesn't finish in
-time. To add a clip to a voice you already created, use `client.voices.enroll(voice_id, file=...)`.
+time. To add a clip to a voice you already created, use
+`client.voices.enroll(voice_id, file=..., consent=True)`.
 
 ## Text to speech
 
@@ -264,13 +269,44 @@ A turn that fails raises `RealtimeError` (for example `code == "voice_not_found"
 
 ### Limits and reconnects
 
-- A session runs up to 4 contexts at once, and a workspace can hold 4 sessions. A fifth session
-  raises `RateLimitError` with `code == "too_many_sessions"`, so reuse a session.
+- A session runs up to 4 contexts at once, and holds one of your plan's concurrent-synthesis
+  slots until it closes. Opening one more than the plan allows raises `RateLimitError` with
+  `code == "concurrency_limited"` (wait `error.retry_after` seconds), so reuse a session.
 - If the connection drops, running contexts raise `RealtimeError`. Check `error.retryable`. The
   next context reconnects automatically (turn this off with `connect(auto_reconnect=False)`).
 - Running out of credits ends the session with `RealtimeError(code="insufficient_credits")`.
 - Text is billed per character as it is sent. A session reserves credits in blocks of up to
   1,000 characters and returns what it doesn't use when it ends.
+
+## Short-lived tokens
+
+Never ship an API key to a browser or a device. Your server mints a short-lived, single-use
+token with an API key that has the `tts` scope, and hands only the token over:
+
+```python
+# On your server
+token = client.tokens.create(ttl_seconds=60, voice_ids=[VOICE_ID])
+return {"token": token.token}
+```
+
+A token carries the `tts` scope only, works for one `speech.create` / `speech.stream` call or
+one realtime session, and dies when the key that minted it is revoked or expires. To use one:
+
+```python
+# Speech: the token is sent as "Authorization: Bearer fin_tok_..."
+Finesse(access_token=token).speech.create(voice_id=VOICE_ID, text="Hi!")
+
+# Realtime: the token rides in the WebSocket subprotocol list. A token is spent by the handshake
+# that uses it, so pass a callback for reconnects to fetch a fresh one from your backend.
+client = AsyncFinesse(access_token=await fetch_token_from_my_backend())
+async with client.realtime.connect(get_access_token=fetch_token_from_my_backend) as rt:
+    ...
+```
+
+A request refused before it runs (a `429` rate limit, a plan check) keeps its token, so you can
+retry it. A spent, expired or unknown token raises `AuthenticationError` with
+`code == "token_invalid"`; a voice outside `voice_ids` raises `PermissionDeniedError` with
+`code == "voice_not_allowed"`.
 
 ## Async usage
 
@@ -319,7 +355,8 @@ but lower ones still come back at 24 kHz, so always read the actual rate from
 ## Handling errors
 
 Every error derives from `flam_finesse.FinesseError`. HTTP errors carry `status_code`,
-`message`, a machine-readable `code` when the API sends one, and `billing_remaining`.
+`message`, a machine-readable `code` (branch on this, not on `message`), `retry_after` when the
+service asks you to wait, `billing_remaining` and `request_id`.
 
 ```python
 import flam_finesse as ff
@@ -339,12 +376,15 @@ except ff.APIConnectionError:
 | Error | Status | When |
 |---|---|---|
 | `BadRequestError` | 400 | Invalid input, text over 10,000 characters, voice not enrolled |
-| `AuthenticationError` | 401 | Missing, unknown or revoked API key |
+| `AuthenticationError` | 401 | Missing, unknown or revoked key; `key_expired`; `token_invalid` |
 | `PaymentRequiredError` | 402 | `insufficient_credits` or `quota_exhausted` |
-| `PermissionDeniedError` | 403 | `feature_disabled`, or `plan_limit_reached` (see `.feature`) |
+| `PermissionDeniedError` | 403 | `insufficient_scope` (the key lacks the route's scope), `voice_not_allowed` (token), `feature_disabled`, or `plan_limit_reached` (see `.feature`) |
 | `NotFoundError` | 404 | No such voice or job, or not visible to your workspace |
-| `RateLimitError` | 429 | Rate limited, or too many realtime sessions |
-| `InternalServerError` | 5xx | A server or engine error |
+| `ConflictError` | 409 | A request with the same `Idempotency-Key` is still running |
+| `PayloadTooLargeError` | 413 | Request body over 21 MiB |
+| `UnprocessableEntityError` | 422 | `invalid_input` (the engine could not use the text), or `idempotency_key_reused` |
+| `RateLimitError` | 429 | `rate_limited` / `concurrency_limited` (your plan's limits; see `retry_after`), or `too_many_sessions` |
+| `InternalServerError` | 5xx | `upstream_error` (502) or `upstream_busy` (503, see `retry_after`): retry |
 | `APIConnectionError` | | No response; `APITimeoutError` when it timed out |
 | `StreamError` | | A speech stream failed after it started |
 | `RealtimeError` | | A realtime context or session failed |

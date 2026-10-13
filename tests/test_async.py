@@ -35,7 +35,7 @@ async def test_clone_and_wait(make_async_client) -> None:
         job("succeeded"),
         envelope(VOICE),
     )
-    v = await client.voices.clone_and_wait(name="a", file=b"x", poll_interval=0)
+    v = await client.voices.clone_and_wait(name="a", consent=True, file=b"x", poll_interval=0)
     assert v.is_ready
 
 

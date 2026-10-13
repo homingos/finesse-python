@@ -101,13 +101,42 @@ async def test_realtime_cancel(voice: ff.Voice) -> None:
 
 
 async def test_realtime_session_cap() -> None:
-    # The cap is 4 sessions per workspace per pod; this assumes one pod (true on dev today).
+    # Each session holds one of the plan's concurrency slots (2 on free); the service also caps
+    # a workspace at 4 sessions per pod. Whichever comes first refuses the next handshake.
     client = ff.AsyncFinesse()
-    sessions = [client.realtime.connect() for _ in range(4)]
+    sessions: list = []
     try:
-        await asyncio.gather(*(s.open() for s in sessions))
         with pytest.raises(ff.RateLimitError) as info:
-            await client.realtime.connect().open()
-        assert info.value.code == "too_many_sessions"
+            for _ in range(5):
+                s = client.realtime.connect()
+                await s.open()
+                sessions.append(s)
+        assert info.value.code in ("concurrency_limited", "too_many_sessions")
+        assert sessions, "at least one session should open"
     finally:
         await asyncio.gather(*(s.close() for s in sessions), return_exceptions=True)
+
+
+def test_clone_requires_consent_locally(client: ff.Finesse) -> None:
+    with pytest.raises(ff.FinesseError, match="consent=True"):
+        client.voices.clone(name="never sent", file=b"x", consent=False)
+
+
+def test_token_speech_then_reuse_is_refused(client: ff.Finesse, voice: ff.Voice) -> None:
+    token = client.tokens.create(ttl_seconds=60, voice_ids=[voice.id])
+    with ff.Finesse(access_token=token.token) as tc:
+        audio = tc.speech.create(voice_id=voice.id, text="Token check.")
+        assert audio.data[:4] == b"RIFF"
+        with pytest.raises(ff.AuthenticationError) as info:
+            tc.speech.create(voice_id=voice.id, text="Again.")
+    assert info.value.code == "token_invalid"
+
+
+async def test_realtime_with_a_token(client: ff.Finesse, voice: ff.Voice) -> None:
+    def fresh() -> str:
+        return client.tokens.create(voice_ids=[voice.id]).token
+
+    rt_client = ff.AsyncFinesse(access_token=fresh())
+    async with rt_client.realtime.connect(get_access_token=fresh) as rt:
+        events = [e async for e in rt.say(voice_id=voice.id, text="Token realtime.")]
+    assert events[-1].type == "task_done"

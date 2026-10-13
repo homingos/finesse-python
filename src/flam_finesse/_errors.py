@@ -26,6 +26,9 @@ __all__ = [
     "PaymentRequiredError",
     "PermissionDeniedError",
     "NotFoundError",
+    "ConflictError",
+    "PayloadTooLargeError",
+    "UnprocessableEntityError",
     "RateLimitError",
     "InternalServerError",
     "StreamError",
@@ -60,16 +63,20 @@ class APIStatusError(FinesseError):
 
     The API returns three error body shapes; all of them are normalised here:
 
-    - ``{"status": 404, "error": true, "message": "Voice not found"}``
+    - ``{"status": 404, "error": true, "message": "Voice not found", "code": "not_found"}``
     - ``{"error": "insufficient_credits", "unit": "character", "limit": 100, "used": 100}``
     - ``{"error": "plan limit reached", "feature": "max_voices", "limit": 3}``
 
     Attributes:
         status_code: HTTP status.
         message: Human-readable reason.
-        code: Machine-readable code when the API sends one (``insufficient_credits``,
-            ``quota_exhausted``, ``feature_disabled``, ``plan_limit_reached``,
-            ``too_many_sessions``), else ``None``.
+        code: Machine-readable code. Branch on this, never on ``message``. Envelope codes:
+            ``invalid_request``, ``unauthorized``, ``key_expired``, ``token_invalid``,
+            ``insufficient_scope``, ``voice_not_allowed``, ``not_found``,
+            ``payload_too_large``, ``invalid_input``, ``rate_limited``,
+            ``concurrency_limited``, ``upstream_error``, ``upstream_busy``, ...; plan
+            denials: ``insufficient_credits``, ``quota_exhausted``, ``feature_disabled``,
+            ``plan_limit_reached``; realtime: ``too_many_sessions``. ``None`` when absent.
         body: The decoded JSON body, or the raw text when it is not JSON.
         billing_remaining: ``X-Billing-Remaining`` header as an int, when sent.
         request_id: The service's ``X-Request-Id``, when sent.
@@ -83,8 +90,22 @@ class APIStatusError(FinesseError):
         self.body = body
         self.code = code
         self.billing_remaining = _int_header(response, "X-Billing-Remaining")
-        self.request_id: Optional[str] = response.headers.get("X-Request-Id")
+        rid = response.headers.get("X-Request-Id")
+        if rid is None and isinstance(body, dict) and isinstance(body.get("request_id"), str):
+            rid = body["request_id"]
+        self.request_id: Optional[str] = rid
         """The service's ``X-Request-Id`` for the failed request; quote it to support."""
+
+    @property
+    def retry_after(self) -> Optional[float]:
+        """Seconds the server asked you to wait (``Retry-After``), when it sent one."""
+        value = self.response.headers.get("Retry-After")
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except ValueError:
+            return None
 
     @property
     def limit(self) -> Optional[int]:
@@ -106,7 +127,8 @@ class BadRequestError(APIStatusError):
 
 
 class AuthenticationError(APIStatusError):
-    """401: the API key is missing, unknown or revoked."""
+    """401: the API key is missing, unknown or revoked; ``key_expired``; or a short-lived
+    token is invalid, expired or already used (``token_invalid``)."""
 
 
 class PaymentRequiredError(APIStatusError):
@@ -114,8 +136,9 @@ class PaymentRequiredError(APIStatusError):
 
 
 class PermissionDeniedError(APIStatusError):
-    """403: the plan lacks the feature (``feature_disabled``) or a cap is reached
-    (``plan_limit_reached``, see ``feature``)."""
+    """403: the key lacks the route's scope (``insufficient_scope``), a token is limited to
+    other voices (``voice_not_allowed``), the plan lacks the feature (``feature_disabled``), or
+    a cap is reached (``plan_limit_reached``, see ``feature``)."""
 
     @property
     def feature(self) -> Optional[str]:
@@ -129,12 +152,27 @@ class NotFoundError(APIStatusError):
     """404: no such resource, or it is not visible to this workspace."""
 
 
+class ConflictError(APIStatusError):
+    """409: e.g. a request with the same ``Idempotency-Key`` is still running."""
+
+
+class PayloadTooLargeError(APIStatusError):
+    """413: the request body is over 21 MiB (``payload_too_large``)."""
+
+
+class UnprocessableEntityError(APIStatusError):
+    """422: the synthesis service could not use the input (``invalid_input``), or an
+    ``Idempotency-Key`` was reused for a different request (``idempotency_key_reused``)."""
+
+
 class RateLimitError(APIStatusError):
-    """429: rate limited, or (realtime) too many concurrent sessions."""
+    """429: over the plan's requests per second (``rate_limited``) or concurrent synthesis
+    (``concurrency_limited``), or (realtime) ``too_many_sessions``. Wait ``retry_after``."""
 
 
 class InternalServerError(APIStatusError):
-    """5xx: a server or synthesis-engine error. Usually safe to retry."""
+    """5xx: a server error, the synthesis service failing (``upstream_error``, 502) or at
+    capacity (``upstream_busy``, 503, with ``retry_after``). Usually safe to retry."""
 
 
 class StreamError(FinesseError):
@@ -173,6 +211,9 @@ _STATUS_ERRORS: dict[int, type[APIStatusError]] = {
     402: PaymentRequiredError,
     403: PermissionDeniedError,
     404: NotFoundError,
+    409: ConflictError,
+    413: PayloadTooLargeError,
+    422: UnprocessableEntityError,
     429: RateLimitError,
 }
 

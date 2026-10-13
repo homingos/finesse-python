@@ -9,6 +9,11 @@ something else::
             if isinstance(event, AudioEvent):
                 play(event.pcm)
 
+From a browser-facing backend, mint a short-lived token per session instead of exposing the
+key (``client.tokens.create``); a client holding only tokens connects with
+``client.realtime.connect(get_access_token=...)``, which fetches a fresh one for every
+(re)connect.
+
 Stream text as an LLM produces it, and cancel on barge-in::
 
     ctx = rt.context(voice_id=vid)
@@ -24,10 +29,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import json
 import uuid
 from types import TracebackType
-from typing import Any, AsyncIterator, Dict, Optional, Type, Union
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, Optional, Type, Union
 
 import httpx
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -50,8 +56,14 @@ __all__ = [
     "TaskCancelled",
 ]
 
+SUBPROTOCOL = "finesse.v1"
+"""The protocol the service selects. A short-lived token travels as a second subprotocol."""
+
+TokenProvider = Callable[[], Union[str, Awaitable[str]]]
+"""Returns a fresh access token (``fin_tok_...``); may be async."""
+
 DEFAULT_OPEN_TIMEOUT = 60.0
-"""Seconds to open a session. The service connects to the engine before accepting the socket,
+"""Seconds to open a session. The service accepts the socket, then connects to the engine,
 which takes longer when the engine is cold."""
 _CLOSE_TIMEOUT = 5.0
 _MAX_FRAME = 16 * 1024 * 1024
@@ -61,15 +73,26 @@ class RealtimeError(FinesseError):
     """A realtime context or session failed.
 
     Attributes:
-        code: ``voice_not_found``, ``insufficient_credits``, ``upstream_closed``,
-            ``connection_lost``, ``service_busy``, a ``task_failed`` code, ...
+        code: Per context: ``voice_not_found``, ``voice_not_allowed`` (the token is limited to
+            other voices), ``invalid_request`` (a parameter out of range), a ``task_failed``
+            code. Whole session: ``insufficient_credits``, ``upstream_unavailable`` (the
+            engine could not be reached), ``upstream_busy`` (it is at capacity),
+            ``upstream_error``, ``upstream_closed``, ``connection_lost``, ``token_spent``, ...
         context_id: The context it applies to, or ``None`` for the whole session.
         close_code: The WebSocket close code, when the socket closed.
         retryable: Whether reconnecting and trying again can succeed.
     """
 
     _RETRYABLE_CODES = frozenset(
-        {"upstream_closed", "connection_lost", "service_busy", "stream_billing_error"}
+        {
+            "upstream_closed",
+            "upstream_error",
+            "upstream_busy",
+            "upstream_unavailable",
+            "connection_lost",
+            "service_busy",
+            "stream_billing_error",
+        }
     )
 
     def __init__(
@@ -103,8 +126,17 @@ def _close_error(code: Optional[int], reason: str) -> Optional[RealtimeError]:
         return RealtimeError(reason or "policy_violation", reason, close_code=code)
     if code == 1009:
         return RealtimeError("message_too_big", "A message was too large.", close_code=code)
-    if code == 1011:
+    if code == 1011:  # reason: upstream_error, upstream_closed or stream_billing_error
         return RealtimeError(reason or "upstream_closed", reason, close_code=code)
+    if code == 1013 and reason in ("upstream_busy", "upstream_unavailable"):
+        return RealtimeError(
+            reason,
+            "The synthesis service is at capacity."
+            if reason == "upstream_busy"
+            else "The synthesis service could not be reached.",
+            close_code=code,
+        )
+    # 4401 / 4429 come only from older services; current ones map them to 1011 / 1013.
     if code == 4401:
         return RealtimeError(
             "service_auth_failed",
@@ -315,8 +347,19 @@ class RealtimeSession:
     were running when the socket dropped fail with :class:`RealtimeError`.
     """
 
-    def __init__(self, config: _Config, *, auto_reconnect: bool, open_timeout: float) -> None:
+    def __init__(
+        self,
+        config: _Config,
+        *,
+        auto_reconnect: bool,
+        open_timeout: float,
+        access_token: Optional[str] = None,
+        get_access_token: Optional[TokenProvider] = None,
+    ) -> None:
         self._config = config
+        self._access_token = access_token or config.access_token
+        self._get_access_token = get_access_token
+        self._token_spent = False
         self._auto_reconnect = auto_reconnect
         self._open_timeout = open_timeout
         self._ws: Optional[ClientConnection] = None
@@ -356,13 +399,19 @@ class RealtimeSession:
                 raise RealtimeError("session_closed", "This session was closed.")
             if self._opened_once and not self._auto_reconnect:
                 raise self._error or RealtimeError("connection_closed", "The session is closed.")
-            headers = {
-                k: v for k, v in self._config.headers.items() if k not in ("Accept", "User-Agent")
-            }
+            token = await self._next_token()
+            # A token replaces the key: it rides in the subprotocol list, the one place a
+            # browser can put a credential on a WebSocket handshake.
+            dropped = {"Accept", "User-Agent"} | (
+                {"X-API-Key", "Authorization"} if token else set()
+            )
+            headers = {k: v for k, v in self._config.headers.items() if k not in dropped}
+            subprotocols = [SUBPROTOCOL, token] if token else [SUBPROTOCOL]
             try:
                 ws = await connect(
                     self.url,
                     additional_headers=headers,
+                    subprotocols=subprotocols,  # type: ignore[arg-type]
                     user_agent_header=self._config.headers.get("User-Agent"),
                     open_timeout=self._open_timeout,
                     max_size=_MAX_FRAME,
@@ -384,12 +433,37 @@ class RealtimeSession:
             if self._closed:  # close() ran while we were connecting
                 await ws.close()
                 raise RealtimeError("session_closed", "This session was closed.")
+            if token and token == self._access_token:
+                self._token_spent = True  # the handshake consumed the static token
             self._ws = ws
             self._pending_audio = None
             self._fatal = None
             self._error = None
             self._opened_once = True
             self._reader = asyncio.ensure_future(self._read(ws))
+
+    async def _next_token(self) -> Optional[str]:
+        """The token for the next handshake, or ``None`` to authenticate with the key.
+
+        A static token (``access_token``, or the client's) is used first; once a handshake has
+        spent it, ``get_access_token`` supplies a fresh one for each reconnect.
+        """
+        if self._access_token and not self._token_spent:
+            return self._access_token
+        if self._get_access_token is not None:
+            token = self._get_access_token()
+            if inspect.isawaitable(token):
+                token = await token
+            if not isinstance(token, str) or not token:
+                raise FinesseError("get_access_token must return a non-empty token string.")
+            return token
+        if self._access_token:
+            raise RealtimeError(
+                "token_spent",
+                "This session's access token was used by an earlier connection. Pass "
+                "get_access_token=... so a reconnect can fetch a fresh one.",
+            )
+        return None
 
     def context(
         self,
@@ -626,9 +700,26 @@ class AsyncRealtime:
         self._config = config
 
     def connect(
-        self, *, auto_reconnect: bool = True, open_timeout: float = DEFAULT_OPEN_TIMEOUT
+        self,
+        *,
+        auto_reconnect: bool = True,
+        open_timeout: float = DEFAULT_OPEN_TIMEOUT,
+        access_token: Optional[str] = None,
+        get_access_token: Optional[TokenProvider] = None,
     ) -> RealtimeSession:
-        """Create a session; it opens on ``async with`` or first use."""
+        """Create a session; it opens on ``async with`` or first use.
+
+        Args:
+            access_token: A short-lived token (``fin_tok_...``) to authenticate with instead
+                of the API key. Single use: it is spent by the handshake, so a reconnect needs
+                ``get_access_token``.
+            get_access_token: Called for a fresh token before every (re)connect, e.g. a call
+                to your own backend that runs ``tokens.create``. May be async.
+        """
         return RealtimeSession(
-            self._config, auto_reconnect=auto_reconnect, open_timeout=open_timeout
+            self._config,
+            auto_reconnect=auto_reconnect,
+            open_timeout=open_timeout,
+            access_token=access_token,
+            get_access_token=get_access_token,
         )

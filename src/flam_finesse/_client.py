@@ -8,7 +8,16 @@ import httpx
 from ._base import DEFAULT_MAX_RETRIES, AsyncHTTP, SyncHTTP, TimeoutTypes, _Config
 from ._raw import RawClient
 from .realtime import AsyncRealtime
-from .resources import AsyncJobs, AsyncSpeech, AsyncVoices, Jobs, Speech, Voices
+from .resources import (
+    AsyncJobs,
+    AsyncSpeech,
+    AsyncTokens,
+    AsyncVoices,
+    Jobs,
+    Speech,
+    Tokens,
+    Voices,
+)
 
 
 class Finesse:
@@ -16,6 +25,9 @@ class Finesse:
 
     Args:
         api_key: Workspace API key (``flv_...``). Defaults to ``FINESSE_API_KEY``.
+        access_token: A short-lived token (``fin_tok_...``) from ``tokens.create``, instead of
+            an API key. It is sent as ``Authorization: Bearer`` and is good for one
+            ``speech.create`` / ``speech.stream`` call; the other resources need a key.
         base_url: API host. Defaults to ``FINESSE_BASE_URL``, then production.
         timeout: Seconds, or an ``httpx.Timeout``. Default 120 s (10 s to connect), or the
             timeout of your ``http_client``.
@@ -38,11 +50,13 @@ class Finesse:
     voices: Voices
     jobs: Jobs
     speech: Speech
+    tokens: Tokens
 
     def __init__(
         self,
         *,
         api_key: Optional[str] = None,
+        access_token: Optional[str] = None,
         base_url: Optional[str] = None,
         timeout: TimeoutTypes = None,
         max_retries: int = DEFAULT_MAX_RETRIES,
@@ -51,6 +65,7 @@ class Finesse:
     ) -> None:
         self._config = _Config(
             api_key=api_key,
+            access_token=access_token,
             base_url=base_url,
             timeout=timeout,
             max_retries=max_retries,
@@ -61,10 +76,11 @@ class Finesse:
 
     def _attach(self) -> None:
         resources = _sync_resources(self._http)
-        self.jobs, self.voices, self.speech = (
+        self.jobs, self.voices, self.speech, self.tokens = (
             resources["jobs"],
             resources["voices"],
             resources["speech"],
+            resources["tokens"],
         )
 
     def with_options(
@@ -120,12 +136,14 @@ class AsyncFinesse:
     voices: AsyncVoices
     jobs: AsyncJobs
     speech: AsyncSpeech
+    tokens: AsyncTokens
     realtime: AsyncRealtime
 
     def __init__(
         self,
         *,
         api_key: Optional[str] = None,
+        access_token: Optional[str] = None,
         base_url: Optional[str] = None,
         timeout: TimeoutTypes = None,
         max_retries: int = DEFAULT_MAX_RETRIES,
@@ -134,6 +152,7 @@ class AsyncFinesse:
     ) -> None:
         self._config = _Config(
             api_key=api_key,
+            access_token=access_token,
             base_url=base_url,
             timeout=timeout,
             max_retries=max_retries,
@@ -144,10 +163,11 @@ class AsyncFinesse:
 
     def _attach(self) -> None:
         resources = _async_resources(self._http)
-        self.jobs, self.voices, self.speech = (
+        self.jobs, self.voices, self.speech, self.tokens = (
             resources["jobs"],
             resources["voices"],
             resources["speech"],
+            resources["tokens"],
         )
         self.realtime = AsyncRealtime(self._http.config)
 
@@ -191,9 +211,19 @@ class AsyncFinesse:
 
 def _sync_resources(http: Any) -> Dict[str, Any]:
     jobs = Jobs(http)
-    return {"jobs": jobs, "voices": Voices(http, jobs), "speech": Speech(http)}
+    return {
+        "jobs": jobs,
+        "voices": Voices(http, jobs),
+        "speech": Speech(http),
+        "tokens": Tokens(http),
+    }
 
 
 def _async_resources(http: Any) -> Dict[str, Any]:
     jobs = AsyncJobs(http)
-    return {"jobs": jobs, "voices": AsyncVoices(http, jobs), "speech": AsyncSpeech(http)}
+    return {
+        "jobs": jobs,
+        "voices": AsyncVoices(http, jobs),
+        "speech": AsyncSpeech(http),
+        "tokens": AsyncTokens(http),
+    }

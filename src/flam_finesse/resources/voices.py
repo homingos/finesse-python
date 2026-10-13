@@ -4,6 +4,7 @@ import json
 from typing import Any, Callable, Dict, Mapping, Optional
 
 from .._base import AsyncHTTP, SyncHTTP, TimeoutTypes, unwrap
+from .._errors import FinesseError
 from .._files import FileInput, to_multipart
 from .._pagination import AsyncVoicePage, AsyncVoicePageRequest, VoicePage
 from .._util import path_id
@@ -15,6 +16,16 @@ def _drop_none(**fields: Any) -> Dict[str, Any]:
     return {k: v for k, v in fields.items() if v is not None}
 
 
+def _consent(consent: bool) -> str:
+    """The API requires an explicit attestation on every clone and enroll."""
+    if consent is not True:
+        raise FinesseError(
+            "Cloning requires consent=True: you attest that you are the speaker or hold their "
+            "explicit permission to clone their voice."
+        )
+    return "true"
+
+
 def _clone_form(
     name: str,
     description: Optional[str],
@@ -24,6 +35,7 @@ def _clone_form(
     remove_background_noise: Optional[bool],
 ) -> Dict[str, str]:
     form = _drop_none(name=name, description=description, language=language, ref_text=ref_text)
+    form["consent"] = "true"
     if labels is not None:
         form["labels"] = json.dumps(dict(labels))
     if remove_background_noise is not None:
@@ -142,6 +154,7 @@ class Voices:
         *,
         name: str,
         file: FileInput,
+        consent: bool,
         description: Optional[str] = None,
         language: Optional[str] = None,
         labels: Optional[Mapping[str, str]] = None,
@@ -151,9 +164,14 @@ class Voices:
         max_retries: Optional[int] = None,
         extra_headers: Optional[Mapping[str, str]] = None,
     ) -> CloneResult:
-        """Create a voice from a reference clip (at most 20 MiB). Returns at once with the voice
-        in ``processing`` and a ``job_id``; use :meth:`wait_until_ready` to block until the voice
-        can speak, or :meth:`clone_and_wait` to do both."""
+        """Create a voice from a reference clip (at most 20 MiB; 10-30 s of clear speech works
+        best). Returns at once with the voice in ``processing`` and a ``job_id``; use
+        :meth:`wait_until_ready` to block until the voice can speak, or :meth:`clone_and_wait`
+        to do both.
+
+        ``consent=True`` is required: you attest that you are the speaker or hold their
+        explicit permission to clone their voice. The attestation is recorded on the voice."""
+        _consent(consent)
         form = _clone_form(name, description, language, labels, ref_text, remove_background_noise)
         response = self._http.with_options(timeout, max_retries, extra_headers).request(
             "POST",
@@ -169,6 +187,7 @@ class Voices:
         voice_id: str,
         *,
         file: FileInput,
+        consent: bool,
         ref_text: Optional[str] = None,
         language: Optional[str] = None,
         timeout: TimeoutTypes = None,
@@ -176,8 +195,8 @@ class Voices:
         extra_headers: Optional[Mapping[str, str]] = None,
     ) -> CloneResult:
         """Clone a reference clip into an existing voice of yours. Returns at once; see
-        :meth:`wait_until_ready`."""
-        form = _drop_none(ref_text=ref_text, language=language)
+        :meth:`wait_until_ready`. ``consent=True`` is required, as on :meth:`clone`."""
+        form = {**_drop_none(ref_text=ref_text, language=language), "consent": _consent(consent)}
         response = self._http.with_options(timeout, max_retries, extra_headers).request(
             "POST",
             f"/voices/{path_id(voice_id)}/enroll",
@@ -211,6 +230,7 @@ class Voices:
         *,
         name: str,
         file: FileInput,
+        consent: bool,
         description: Optional[str] = None,
         language: Optional[str] = None,
         labels: Optional[Mapping[str, str]] = None,
@@ -224,6 +244,7 @@ class Voices:
         clone = self.clone(
             name=name,
             file=file,
+            consent=consent,
             description=description,
             language=language,
             labels=labels,
@@ -332,6 +353,7 @@ class AsyncVoices:
         *,
         name: str,
         file: FileInput,
+        consent: bool,
         description: Optional[str] = None,
         language: Optional[str] = None,
         labels: Optional[Mapping[str, str]] = None,
@@ -341,6 +363,7 @@ class AsyncVoices:
         max_retries: Optional[int] = None,
         extra_headers: Optional[Mapping[str, str]] = None,
     ) -> CloneResult:
+        _consent(consent)
         form = _clone_form(name, description, language, labels, ref_text, remove_background_noise)
         response = await self._http.with_options(timeout, max_retries, extra_headers).request(
             "POST",
@@ -356,13 +379,14 @@ class AsyncVoices:
         voice_id: str,
         *,
         file: FileInput,
+        consent: bool,
         ref_text: Optional[str] = None,
         language: Optional[str] = None,
         timeout: TimeoutTypes = None,
         max_retries: Optional[int] = None,
         extra_headers: Optional[Mapping[str, str]] = None,
     ) -> CloneResult:
-        form = _drop_none(ref_text=ref_text, language=language)
+        form = {**_drop_none(ref_text=ref_text, language=language), "consent": _consent(consent)}
         response = await self._http.with_options(timeout, max_retries, extra_headers).request(
             "POST",
             f"/voices/{path_id(voice_id)}/enroll",
@@ -390,6 +414,7 @@ class AsyncVoices:
         *,
         name: str,
         file: FileInput,
+        consent: bool,
         description: Optional[str] = None,
         language: Optional[str] = None,
         labels: Optional[Mapping[str, str]] = None,
@@ -402,6 +427,7 @@ class AsyncVoices:
         clone = await self.clone(
             name=name,
             file=file,
+            consent=consent,
             description=description,
             language=language,
             labels=labels,

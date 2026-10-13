@@ -91,6 +91,7 @@ def test_clone_multipart(make_client) -> None:
     res = client.voices.clone(
         name="Ana",
         file=("ref.wav", b"RIFFbytes"),
+        consent=True,
         labels={"accent": "british"},
         ref_text="hello",
         remove_background_noise=True,
@@ -103,6 +104,7 @@ def test_clone_multipart(make_client) -> None:
     for part in (
         b'name="name"\r\n\r\nAna',
         b'name="ref_text"\r\n\r\nhello',
+        b'name="consent"\r\n\r\ntrue',
         b'name="remove_background_noise"\r\n\r\ntrue',
         b'filename="ref.wav"',
         b"Content-Type: audio/x-wav",
@@ -117,10 +119,10 @@ def test_clone_from_path_and_bytes(make_client, tmp_path) -> None:
     clip.write_bytes(b"ID3x")
     ok = envelope({"voice": VOICE, "job_id": JOB_ID}, 202)
     client, rec = make_client(ok, ok)
-    client.voices.clone(name="a", file=clip)
+    client.voices.clone(name="a", consent=True, file=clip)
     assert b'filename="me.mp3"' in rec.requests[0].content
     assert b"Content-Type: audio/mpeg" in rec.requests[0].content
-    client.voices.clone(name="b", file=b"RAWCLIP")
+    client.voices.clone(name="b", consent=True, file=b"RAWCLIP")
     assert b'filename="audio.wav"' in rec.requests[1].content
     assert b"RAWCLIP" in rec.requests[1].content
 
@@ -130,12 +132,12 @@ def test_text_mode_file_rejected(make_client, tmp_path) -> None:
     clip.write_text("x")
     client, _ = make_client()
     with clip.open("r") as f, pytest.raises(TypeError, match="binary"):
-        client.voices.clone(name="a", file=f)  # type: ignore[arg-type]
+        client.voices.clone(name="a", consent=True, file=f)  # type: ignore[arg-type]
 
 
 def test_enroll(make_client) -> None:
     client, rec = make_client(envelope({"voice": VOICE, "job_id": JOB_ID}, 202))
-    client.voices.enroll(VOICE["id"], file=b"x", language="hi")
+    client.voices.enroll(VOICE["id"], consent=True, file=b"x", language="hi")
     assert rec.last.url.path.endswith(f"/voices/{VOICE['id']}/enroll")
     assert b'name="language"\r\n\r\nhi' in rec.last.content
 
@@ -149,7 +151,11 @@ def test_clone_and_wait(make_client) -> None:
         envelope(VOICE),
     )
     v = client.voices.clone_and_wait(
-        name="Ana", file=b"x", poll_interval=0, on_update=lambda j: seen.append(j.status)
+        name="Ana",
+        file=b"x",
+        consent=True,
+        poll_interval=0,
+        on_update=lambda j: seen.append(j.status),
     )
     assert v.is_ready
     assert seen == ["running", "succeeded"]

@@ -148,7 +148,9 @@ def test_raw_response_is_the_first_request(make_client) -> None:
         with_id(job, "poll"),
         with_id(envelope(VOICE), "get"),
     )
-    raw = client.with_raw_response.voices.clone_and_wait(name="a", file=b"x", poll_interval=0)
+    raw = client.with_raw_response.voices.clone_and_wait(
+        name="a", consent=True, file=b"x", poll_interval=0
+    )
     assert (raw.status_code, raw.request_id) == (202, "clone")
     assert raw.parse().is_ready
     assert len(rec.requests) == 3

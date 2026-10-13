@@ -13,13 +13,16 @@ from ._errors import (
     BadRequestError,
     CloneFailedError,
     CloneTimeoutError,
+    ConflictError,
     FinesseError,
     InternalServerError,
     NotFoundError,
+    PayloadTooLargeError,
     PaymentRequiredError,
     PermissionDeniedError,
     RateLimitError,
     StreamError,
+    UnprocessableEntityError,
 )
 from ._pagination import AsyncVoicePage, AsyncVoicePageRequest, VoicePage
 from ._raw import RawResponse
@@ -36,7 +39,16 @@ from .realtime import (
     TaskStarted,
 )
 from .resources import AsyncSpeechStream, SpeechStream
-from .types import Audio, AudioChunk, CloneJob, CloneResult, StreamDone, Voice, VoiceSettings
+from .types import (
+    AccessToken,
+    Audio,
+    AudioChunk,
+    CloneJob,
+    CloneResult,
+    StreamDone,
+    Voice,
+    VoiceSettings,
+)
 
 __all__ = [
     "__version__",
@@ -49,6 +61,7 @@ __all__ = [
     "AsyncVoicePageRequest",
     "CloneJob",
     "CloneResult",
+    "AccessToken",
     "Audio",
     "RawResponse",
     "AudioChunk",
@@ -64,6 +77,9 @@ __all__ = [
     "PaymentRequiredError",
     "PermissionDeniedError",
     "NotFoundError",
+    "ConflictError",
+    "PayloadTooLargeError",
+    "UnprocessableEntityError",
     "RateLimitError",
     "InternalServerError",
     "StreamError",

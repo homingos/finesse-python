@@ -21,6 +21,7 @@ __all__ = [
     "Audio",
     "AudioChunk",
     "StreamDone",
+    "AccessToken",
 ]
 
 
@@ -186,3 +187,25 @@ class StreamDone(_Model):
     audio_duration_s: Optional[float] = None
     generation_id: Optional[str] = None
     audio_url: Optional[str] = None
+
+
+class AccessToken(_Model):
+    """A short-lived, single-use token from ``tokens.create``.
+
+    Hand ``token`` to a browser or device: it is good for one ``speech.create`` /
+    ``speech.stream`` call or one realtime session, carries the ``tts`` scope only, and dies
+    when the key that minted it is revoked or expires. It is shown once.
+    """
+
+    token: str
+    expires_at: Optional[datetime] = None
+    ttl_seconds: Optional[int] = None
+
+    @field_validator("expires_at", mode="before")
+    @classmethod
+    def _expires(cls, value: Any) -> Any:
+        return _millis(value)
+
+    def __repr__(self) -> str:
+        # Never print the secret itself.
+        return f"AccessToken(token='{self.token[:12]}...', expires_at={self.expires_at!r})"

@@ -49,24 +49,35 @@ class _Config:
         timeout: TimeoutTypes,
         max_retries: int,
         default_headers: Optional[Mapping[str, str]],
+        access_token: Optional[str] = None,
     ) -> None:
-        api_key = api_key if api_key is not None else os.environ.get("FINESSE_API_KEY")
-        if not api_key:
-            raise FinesseError(
-                "No API key. Pass api_key=... or set the FINESSE_API_KEY environment variable."
-            )
-        self.api_key = api_key
+        if api_key and access_token:
+            raise FinesseError("Pass api_key or access_token, not both.")
+        if not access_token:
+            api_key = api_key if api_key is not None else os.environ.get("FINESSE_API_KEY")
+            if not api_key:
+                raise FinesseError(
+                    "No API key. Pass api_key=... or set the FINESSE_API_KEY environment "
+                    "variable (or pass access_token=... for a short-lived token)."
+                )
+        self.api_key: Optional[str] = api_key or None
+        self.access_token: Optional[str] = access_token or None
         base = base_url or os.environ.get("FINESSE_BASE_URL") or DEFAULT_BASE_URL
         self.base_url = base.rstrip("/")
         self.timeout = timeout
         self.max_retries = max_retries
         self.server = _ServerState()
         self.headers: Dict[str, str] = {
-            "X-API-Key": api_key,
             "User-Agent": f"{CLIENT_NAME} python/{platform.python_version()}",
             "X-Finesse-Client": CLIENT_NAME,
             "Accept": "application/json",
         }
+        if self.access_token:
+            # A short-lived token (tokens.create) is a Bearer credential, good for one
+            # speech.create / speech.stream call or one realtime session.
+            self.headers["Authorization"] = f"Bearer {self.access_token}"
+        else:
+            self.headers["X-API-Key"] = self.api_key or ""
         if default_headers:
             self.headers.update(default_headers)
 

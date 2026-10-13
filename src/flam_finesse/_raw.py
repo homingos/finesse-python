@@ -96,10 +96,11 @@ def _wrap(seen: List[httpx.Response], result: Any) -> RawResponse[Any]:
 
 
 class RawClient:
-    """``client.with_raw_response``: ``voices``, ``jobs`` and ``speech`` with the same methods,
-    each returning a :class:`RawResponse`."""
+    """``client.with_raw_response``: ``voices``, ``jobs``, ``speech`` and ``tokens`` with the
+    same methods, each returning a :class:`RawResponse`."""
 
     def __init__(self, http: Any, build: Build, is_async: bool) -> None:
         self.voices: Any = _Namespace(http, build, "voices", is_async)
         self.jobs: Any = _Namespace(http, build, "jobs", is_async)
         self.speech: Any = _Namespace(http, build, "speech", is_async)
+        self.tokens: Any = _Namespace(http, build, "tokens", is_async)

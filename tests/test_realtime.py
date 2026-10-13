@@ -302,6 +302,15 @@ def closing_with(
             "upstream_closed",
             True,
         ),
+        (
+            {"code": "upstream_unavailable", "message": "engine unreachable", "fatal": True},
+            1013,
+            "upstream_unavailable",
+            "upstream_unavailable",
+            True,
+        ),
+        (None, 1013, "upstream_busy", "upstream_busy", True),
+        (None, 1011, "upstream_error", "upstream_error", True),
         (None, 4429, "too many connections", "service_busy", True),
         (None, 4401, "bad engine key", "service_auth_failed", False),
         (None, 1011, "", "upstream_closed", True),
@@ -610,3 +619,105 @@ async def test_reader_survives_a_handler_failure(monkeypatch: pytest.MonkeyPatch
         events = await collect(ctx)  # the first frame (task_started) is lost, the rest arrive
         assert events[-1].type == "task_done"
     assert engine.connections == 1
+
+
+# -- short-lived tokens --------------------------------------------------------------------
+
+
+async def test_token_rides_in_the_subprotocol_not_a_header() -> None:
+    engine = Engine()
+    async with running(engine) as client, client.realtime.connect(access_token="fin_tok_abc") as rt:
+        await collect(rt.say(voice_id=VID, text="hi"))
+    h = engine.headers[0]
+    assert h["Sec-WebSocket-Protocol"] == "finesse.v1, fin_tok_abc"
+    assert "X-API-Key" not in h and "Authorization" not in h
+
+
+async def test_key_session_offers_the_subprotocol_without_a_token() -> None:
+    engine = Engine()
+    async with running(engine) as client, client.realtime.connect() as rt:
+        await collect(rt.say(voice_id=VID, text="hi"))
+    assert engine.headers[0]["Sec-WebSocket-Protocol"] == "finesse.v1"
+
+
+async def test_a_spent_token_cannot_reconnect() -> None:
+    engine = Engine()
+    first = True
+
+    async def drop_once(ws: ServerConnection, msg: Dict[str, Any]) -> None:
+        nonlocal first
+        if first and msg["type"] == "task_start":
+            first = False
+            ws.transport.abort()
+            return
+        await Engine.on_message(engine, ws, msg)
+
+    engine.on_message = drop_once  # type: ignore[method-assign]
+    async with running(engine) as client, client.realtime.connect(access_token="fin_tok_1") as rt:
+        with pytest.raises(ff.RealtimeError):
+            await collect(rt.say(voice_id=VID, text="x"))
+        with pytest.raises(ff.RealtimeError) as info:
+            await collect(rt.say(voice_id=VID, text="again"))
+        assert info.value.code == "token_spent"
+    assert engine.connections == 1
+
+
+async def test_get_access_token_fetches_a_fresh_token_per_connect() -> None:
+    engine = Engine()
+    first = True
+    issued: List[str] = []
+
+    async def drop_once(ws: ServerConnection, msg: Dict[str, Any]) -> None:
+        nonlocal first
+        if first and msg["type"] == "task_start":
+            first = False
+            ws.transport.abort()
+            return
+        await Engine.on_message(engine, ws, msg)
+
+    async def fresh() -> str:
+        issued.append(f"fin_tok_{len(issued)}")
+        return issued[-1]
+
+    engine.on_message = drop_once  # type: ignore[method-assign]
+    async with running(engine) as client, client.realtime.connect(get_access_token=fresh) as rt:
+        with pytest.raises(ff.RealtimeError):
+            await collect(rt.say(voice_id=VID, text="x"))
+        events = await collect(rt.say(voice_id=VID, text="again"))
+        assert events[-1].type == "task_done"
+    assert issued == ["fin_tok_0", "fin_tok_1"]
+    assert [h["Sec-WebSocket-Protocol"] for h in engine.headers] == [
+        "finesse.v1, fin_tok_0",
+        "finesse.v1, fin_tok_1",
+    ]
+
+
+async def test_static_token_first_then_the_callback_on_reconnect() -> None:
+    engine = Engine()
+    first = True
+    issued: List[str] = []
+
+    async def drop_once(ws: ServerConnection, msg: Dict[str, Any]) -> None:
+        nonlocal first
+        if first and msg["type"] == "task_start":
+            first = False
+            ws.transport.abort()
+            return
+        await Engine.on_message(engine, ws, msg)
+
+    def fresh() -> str:
+        issued.append("fin_tok_fresh")
+        return issued[-1]
+
+    engine.on_message = drop_once  # type: ignore[method-assign]
+    async with serve(engine.handler, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        client = AsyncFinesse(access_token="fin_tok_first", base_url=f"http://127.0.0.1:{port}")
+        async with client.realtime.connect(get_access_token=fresh) as rt:
+            with pytest.raises(ff.RealtimeError):
+                await collect(rt.say(voice_id=VID, text="x"))
+            await collect(rt.say(voice_id=VID, text="again"))
+    assert [h["Sec-WebSocket-Protocol"] for h in engine.headers] == [
+        "finesse.v1, fin_tok_first",
+        "finesse.v1, fin_tok_fresh",
+    ]

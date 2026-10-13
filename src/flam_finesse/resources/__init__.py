@@ -1,5 +1,6 @@
 from .jobs import AsyncJobs, Jobs
 from .speech import AsyncSpeech, AsyncSpeechStream, Speech, SpeechStream
+from .tokens import AsyncTokens, Tokens
 from .voices import AsyncVoices, Voices
 
 __all__ = [
@@ -11,4 +12,6 @@ __all__ = [
     "AsyncSpeech",
     "SpeechStream",
     "AsyncSpeechStream",
+    "Tokens",
+    "AsyncTokens",
 ]
