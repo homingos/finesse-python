@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import Callable, Optional
+from typing import Callable, Mapping, Optional
 
-from .._base import AsyncHTTP, SyncHTTP, unwrap
+from .._base import AsyncHTTP, SyncHTTP, TimeoutTypes, unwrap
 from .._errors import CloneFailedError, CloneTimeoutError
 from .._util import path_id
 from ..types import CloneJob
@@ -19,9 +19,20 @@ class Jobs:
     def __init__(self, http: SyncHTTP) -> None:
         self._http = http
 
-    def get(self, job_id: str) -> CloneJob:
+    def get(
+        self,
+        job_id: str,
+        *,
+        timeout: TimeoutTypes = None,
+        max_retries: Optional[int] = None,
+        extra_headers: Optional[Mapping[str, str]] = None,
+    ) -> CloneJob:
         return CloneJob.model_validate(
-            unwrap(self._http.request("GET", f"/jobs/{path_id(job_id)}"))
+            unwrap(
+                self._http.with_options(timeout, max_retries, extra_headers).request(
+                    "GET", f"/jobs/{path_id(job_id)}"
+                )
+            )
         )
 
     def wait(
@@ -61,8 +72,17 @@ class AsyncJobs:
     def __init__(self, http: AsyncHTTP) -> None:
         self._http = http
 
-    async def get(self, job_id: str) -> CloneJob:
-        response = await self._http.request("GET", f"/jobs/{path_id(job_id)}")
+    async def get(
+        self,
+        job_id: str,
+        *,
+        timeout: TimeoutTypes = None,
+        max_retries: Optional[int] = None,
+        extra_headers: Optional[Mapping[str, str]] = None,
+    ) -> CloneJob:
+        response = await self._http.with_options(timeout, max_retries, extra_headers).request(
+            "GET", f"/jobs/{path_id(job_id)}"
+        )
         return CloneJob.model_validate(unwrap(response))
 
     async def wait(

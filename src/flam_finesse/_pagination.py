@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, AsyncIterator, Awaitable, Callable, Dict, Iterator, List
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, Generator, Iterator, List
 
 from .types import Voice
 
@@ -79,3 +79,24 @@ class AsyncVoicePage:
             f"AsyncVoicePage(page={self.page}, voices={len(self.voices)}, total={self.total}, "
             f"has_more={self.has_more})"
         )
+
+
+class AsyncVoicePageRequest:
+    """What async ``voices.list()`` returns: ``await`` it for the first page, or iterate it
+    directly to walk every voice::
+
+        page = await client.voices.list()
+        async for voice in client.voices.list():
+            ...
+    """
+
+    def __init__(self, fetch: Callable[[], Awaitable[AsyncVoicePage]]) -> None:
+        self._fetch = fetch
+
+    def __await__(self) -> Generator[Any, None, AsyncVoicePage]:
+        return self._fetch().__await__()
+
+    async def __aiter__(self) -> AsyncIterator[Voice]:
+        page = await self._fetch()
+        async for voice in page:
+            yield voice

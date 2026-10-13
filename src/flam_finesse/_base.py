@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import email.utils
 import os
 import platform
@@ -180,6 +181,26 @@ class SyncHTTP:
                 continue
             raise make_status_error(response)
 
+    def with_options(
+        self,
+        timeout: TimeoutTypes,
+        max_retries: Optional[int],
+        extra_headers: Optional[Mapping[str, str]],
+    ) -> SyncHTTP:
+        """A view of this transport with per-request overrides (same connection pool)."""
+        if timeout is None and max_retries is None and not extra_headers:
+            return self
+        config = copy.copy(self.config)
+        config.headers = {**config.headers, **(extra_headers or {})}
+        if timeout is not None:
+            config.timeout = timeout
+        if max_retries is not None:
+            config.max_retries = max_retries
+        view = copy.copy(self)
+        view.config = config
+        view._owns_client = False
+        return view
+
     def close(self) -> None:
         if self._owns_client:
             self.client.close()
@@ -237,6 +258,26 @@ class AsyncHTTP:
                 attempt += 1
                 continue
             raise make_status_error(response)
+
+    def with_options(
+        self,
+        timeout: TimeoutTypes,
+        max_retries: Optional[int],
+        extra_headers: Optional[Mapping[str, str]],
+    ) -> AsyncHTTP:
+        """A view of this transport with per-request overrides (same connection pool)."""
+        if timeout is None and max_retries is None and not extra_headers:
+            return self
+        config = copy.copy(self.config)
+        config.headers = {**config.headers, **(extra_headers or {})}
+        if timeout is not None:
+            config.timeout = timeout
+        if max_retries is not None:
+            config.max_retries = max_retries
+        view = copy.copy(self)
+        view.config = config
+        view._owns_client = False
+        return view
 
     async def close(self) -> None:
         if self._owns_client:

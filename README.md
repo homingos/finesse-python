@@ -36,11 +36,28 @@ Configuration:
 
 Use `https://finesse.example.test` as `base_url` for the development environment.
 
+Every request method also takes per-call overrides:
+
+```python
+client.speech.create(
+    voice_id=voice.id,
+    text="Hello!",
+    timeout=30.0,  # seconds, or an httpx.Timeout
+    max_retries=0,
+    extra_headers={"X-Request-Id": "abc"},
+)
+```
+
+(On `jobs.wait`, `wait_until_ready` and `clone_and_wait`, `timeout` is the overall wait.)
+
 ## Voices
 
 ```python
 for voice in client.voices.list():  # walks every page
     print(voice.id, voice.name, voice.status, voice.labels)
+
+async for voice in async_client.voices.list():  # the same with AsyncFinesse
+    ...
 
 voice = client.voices.get("665f1a2b3c4d5e6f7a8b9c0d")
 client.voices.update(voice.id, name="Narrator (UK)", labels={"accent": "british"})

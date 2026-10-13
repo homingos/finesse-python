@@ -21,7 +21,7 @@ from ._errors import (
     RateLimitError,
     StreamError,
 )
-from ._pagination import AsyncVoicePage, VoicePage
+from ._pagination import AsyncVoicePage, AsyncVoicePageRequest, VoicePage
 from ._version import __version__
 from .realtime import (
     AudioEvent,
@@ -45,6 +45,7 @@ __all__ = [
     "VoiceSettings",
     "VoicePage",
     "AsyncVoicePage",
+    "AsyncVoicePageRequest",
     "CloneJob",
     "CloneResult",
     "Audio",

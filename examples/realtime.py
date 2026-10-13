@@ -9,7 +9,7 @@ from flam_finesse import AsyncFinesse, AudioEvent
 async def main() -> None:
     client = AsyncFinesse()
     voice = None
-    async for v in await client.voices.list():
+    async for v in client.voices.list():
         if v.is_ready:
             voice = v
             break

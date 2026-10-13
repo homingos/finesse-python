@@ -4,11 +4,11 @@ import base64
 import binascii
 import json
 from types import TracebackType
-from typing import Any, AsyncIterator, Dict, Iterator, Optional, Type
+from typing import Any, AsyncIterator, Dict, Iterator, Mapping, Optional, Type
 
 import httpx
 
-from .._base import AsyncHTTP, SyncHTTP, _transport_error
+from .._base import AsyncHTTP, SyncHTTP, TimeoutTypes, _transport_error
 from .._errors import FinesseError, StreamError
 from .._sse import SSEEvent, aiter_sse, iter_sse
 from .._util import path_id
@@ -260,6 +260,9 @@ class Speech:
         output_format: Optional[str] = None,
         sample_rate: Optional[int] = None,
         num_step: Optional[int] = None,
+        timeout: TimeoutTypes = None,
+        max_retries: Optional[int] = None,
+        extra_headers: Optional[Mapping[str, str]] = None,
     ) -> Audio:
         """Synthesize ``text`` (at most 10,000 characters) and return the whole clip.
 
@@ -272,7 +275,9 @@ class Speech:
             num_step: Generation steps (default 32); fewer is faster, more is higher quality.
         """
         body = _speech_body(text, language, output_format, sample_rate, num_step)
-        response = self._http.request("POST", f"/voices/{path_id(voice_id)}/speak", json=body)
+        response = self._http.with_options(timeout, max_retries, extra_headers).request(
+            "POST", f"/voices/{path_id(voice_id)}/speak", json=body
+        )
         return _audio(response)
 
     def stream(
@@ -284,6 +289,9 @@ class Speech:
         output_format: Optional[str] = None,
         sample_rate: Optional[int] = None,
         num_step: Optional[int] = None,
+        timeout: TimeoutTypes = None,
+        max_retries: Optional[int] = None,
+        extra_headers: Optional[Mapping[str, str]] = None,
     ) -> SpeechStream:
         """Stream speech as raw PCM chunks (``s16le`` unless ``output_format`` says otherwise)::
 
@@ -292,7 +300,11 @@ class Speech:
                 play(chunk.pcm)
         """
         body = _speech_body(text, language, output_format, sample_rate, num_step)
-        return SpeechStream(self._http, f"/voices/{path_id(voice_id)}/stream", body)
+        return SpeechStream(
+            self._http.with_options(timeout, max_retries, extra_headers),
+            f"/voices/{path_id(voice_id)}/stream",
+            body,
+        )
 
 
 class AsyncSpeech:
@@ -310,9 +322,14 @@ class AsyncSpeech:
         output_format: Optional[str] = None,
         sample_rate: Optional[int] = None,
         num_step: Optional[int] = None,
+        timeout: TimeoutTypes = None,
+        max_retries: Optional[int] = None,
+        extra_headers: Optional[Mapping[str, str]] = None,
     ) -> Audio:
         body = _speech_body(text, language, output_format, sample_rate, num_step)
-        response = await self._http.request("POST", f"/voices/{path_id(voice_id)}/speak", json=body)
+        response = await self._http.with_options(timeout, max_retries, extra_headers).request(
+            "POST", f"/voices/{path_id(voice_id)}/speak", json=body
+        )
         return _audio(response)
 
     def stream(
@@ -324,7 +341,14 @@ class AsyncSpeech:
         output_format: Optional[str] = None,
         sample_rate: Optional[int] = None,
         num_step: Optional[int] = None,
+        timeout: TimeoutTypes = None,
+        max_retries: Optional[int] = None,
+        extra_headers: Optional[Mapping[str, str]] = None,
     ) -> AsyncSpeechStream:
         """``async with client.speech.stream(...) as stream: async for chunk in stream: ...``"""
         body = _speech_body(text, language, output_format, sample_rate, num_step)
-        return AsyncSpeechStream(self._http, f"/voices/{path_id(voice_id)}/stream", body)
+        return AsyncSpeechStream(
+            self._http.with_options(timeout, max_retries, extra_headers),
+            f"/voices/{path_id(voice_id)}/stream",
+            body,
+        )
