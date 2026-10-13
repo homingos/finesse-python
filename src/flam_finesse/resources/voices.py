@@ -1,0 +1,312 @@
+from __future__ import annotations
+
+import json
+from typing import Any, Callable, Dict, Mapping, Optional
+
+from .._base import AsyncHTTP, SyncHTTP, unwrap
+from .._files import FileInput, to_multipart
+from .._pagination import AsyncVoicePage, VoicePage
+from .._util import path_id
+from ..types import CloneJob, CloneResult, Voice
+from .jobs import DEFAULT_POLL_INTERVAL, DEFAULT_WAIT_TIMEOUT, AsyncJobs, Jobs
+
+
+def _drop_none(**fields: Any) -> Dict[str, Any]:
+    return {k: v for k, v in fields.items() if v is not None}
+
+
+def _clone_form(
+    name: str,
+    description: Optional[str],
+    language: Optional[str],
+    labels: Optional[Mapping[str, str]],
+    ref_text: Optional[str],
+    remove_background_noise: Optional[bool],
+) -> Dict[str, str]:
+    form = _drop_none(name=name, description=description, language=language, ref_text=ref_text)
+    if labels is not None:
+        form["labels"] = json.dumps(dict(labels))
+    if remove_background_noise is not None:
+        form["remove_background_noise"] = "true" if remove_background_noise else "false"
+    return form
+
+
+class Voices:
+    """Create, list, clone and manage voices."""
+
+    def __init__(self, http: SyncHTTP, jobs: Jobs) -> None:
+        self._http = http
+        self._jobs = jobs
+
+    def list(self, *, page: int = 1, page_size: int = 50) -> VoicePage:
+        """List your voices (newest first), then the public platform voices.
+
+        Iterate the result to walk every voice across all pages. ``page_size`` is capped at 100.
+        """
+
+        def fetch(n: int) -> VoicePage:
+            response = self._http.request(
+                "GET", "/voices", params={"page": n, "page_size": page_size}
+            )
+            return VoicePage(unwrap(response), fetch)
+
+        return fetch(page)
+
+    def get(self, voice_id: str) -> Voice:
+        """Get one of your voices or a public platform voice."""
+        return Voice.model_validate(
+            unwrap(self._http.request("GET", f"/voices/{path_id(voice_id)}"))
+        )
+
+    def create(
+        self,
+        *,
+        name: str,
+        description: Optional[str] = None,
+        language: Optional[str] = None,
+        labels: Optional[Mapping[str, str]] = None,
+        model: Optional[str] = None,
+    ) -> Voice:
+        """Create an empty ``draft`` voice. Give it a reference clip with :meth:`enroll`, or use
+        :meth:`clone` to do both at once."""
+        body = _drop_none(name=name, description=description, language=language, model=model)
+        if labels is not None:
+            body["labels"] = dict(labels)
+        return Voice.model_validate(unwrap(self._http.request("POST", "/voices", json=body)))
+
+    def update(
+        self,
+        voice_id: str,
+        *,
+        name: Optional[str] = None,
+        description: Optional[str] = None,
+        language: Optional[str] = None,
+        labels: Optional[Mapping[str, str]] = None,
+    ) -> Voice:
+        """Change a voice's metadata. Only the arguments you pass change; ``labels`` replaces the
+        whole label set (``{}`` clears it)."""
+        body = _drop_none(name=name, description=description, language=language)
+        if labels is not None:
+            body["labels"] = dict(labels)
+        response = self._http.request("PATCH", f"/voices/{path_id(voice_id)}", json=body)
+        return Voice.model_validate(unwrap(response))
+
+    def delete(self, voice_id: str) -> None:
+        """Delete one of your voices."""
+        self._http.request("DELETE", f"/voices/{path_id(voice_id)}")
+
+    def clone(
+        self,
+        *,
+        name: str,
+        file: FileInput,
+        description: Optional[str] = None,
+        language: Optional[str] = None,
+        labels: Optional[Mapping[str, str]] = None,
+        ref_text: Optional[str] = None,
+        remove_background_noise: Optional[bool] = None,
+    ) -> CloneResult:
+        """Create a voice from a reference clip (at most 20 MiB). Returns at once with the voice
+        in ``processing`` and a ``job_id``; use :meth:`wait_until_ready` to block until the voice
+        can speak, or :meth:`clone_and_wait` to do both."""
+        form = _clone_form(name, description, language, labels, ref_text, remove_background_noise)
+        response = self._http.request(
+            "POST", "/voices/clone", data=form, files={"file": to_multipart(file)}
+        )
+        return CloneResult.model_validate(unwrap(response))
+
+    def enroll(
+        self,
+        voice_id: str,
+        *,
+        file: FileInput,
+        ref_text: Optional[str] = None,
+        language: Optional[str] = None,
+    ) -> CloneResult:
+        """Clone a reference clip into an existing voice of yours. Returns at once; see
+        :meth:`wait_until_ready`."""
+        form = _drop_none(ref_text=ref_text, language=language)
+        response = self._http.request(
+            "POST",
+            f"/voices/{path_id(voice_id)}/enroll",
+            data=form,
+            files={"file": to_multipart(file)},
+        )
+        return CloneResult.model_validate(unwrap(response))
+
+    def wait_until_ready(
+        self,
+        clone: CloneResult,
+        *,
+        timeout: float = DEFAULT_WAIT_TIMEOUT,
+        poll_interval: float = DEFAULT_POLL_INTERVAL,
+        on_update: Optional[Callable[[CloneJob], None]] = None,
+    ) -> Voice:
+        """Wait for a clone job to finish and return the voice, now ``ready``.
+
+        Raises:
+            CloneFailedError: cloning failed.
+            CloneTimeoutError: it did not finish within ``timeout`` seconds.
+        """
+        self._jobs.wait(
+            clone.job_id, timeout=timeout, poll_interval=poll_interval, on_update=on_update
+        )
+        return self.get(clone.voice.id)
+
+    def clone_and_wait(
+        self,
+        *,
+        name: str,
+        file: FileInput,
+        description: Optional[str] = None,
+        language: Optional[str] = None,
+        labels: Optional[Mapping[str, str]] = None,
+        ref_text: Optional[str] = None,
+        remove_background_noise: Optional[bool] = None,
+        timeout: float = DEFAULT_WAIT_TIMEOUT,
+        poll_interval: float = DEFAULT_POLL_INTERVAL,
+        on_update: Optional[Callable[[CloneJob], None]] = None,
+    ) -> Voice:
+        """:meth:`clone`, then :meth:`wait_until_ready`. Returns the ready voice."""
+        clone = self.clone(
+            name=name,
+            file=file,
+            description=description,
+            language=language,
+            labels=labels,
+            ref_text=ref_text,
+            remove_background_noise=remove_background_noise,
+        )
+        return self.wait_until_ready(
+            clone, timeout=timeout, poll_interval=poll_interval, on_update=on_update
+        )
+
+
+class AsyncVoices:
+    """Async counterpart of :class:`Voices`."""
+
+    def __init__(self, http: AsyncHTTP, jobs: AsyncJobs) -> None:
+        self._http = http
+        self._jobs = jobs
+
+    async def list(self, *, page: int = 1, page_size: int = 50) -> AsyncVoicePage:
+        """List voices. ``async for voice in await client.voices.list()`` walks every page."""
+
+        async def fetch(n: int) -> AsyncVoicePage:
+            response = await self._http.request(
+                "GET", "/voices", params={"page": n, "page_size": page_size}
+            )
+            return AsyncVoicePage(unwrap(response), fetch)
+
+        return await fetch(page)
+
+    async def get(self, voice_id: str) -> Voice:
+        response = await self._http.request("GET", f"/voices/{path_id(voice_id)}")
+        return Voice.model_validate(unwrap(response))
+
+    async def create(
+        self,
+        *,
+        name: str,
+        description: Optional[str] = None,
+        language: Optional[str] = None,
+        labels: Optional[Mapping[str, str]] = None,
+        model: Optional[str] = None,
+    ) -> Voice:
+        body = _drop_none(name=name, description=description, language=language, model=model)
+        if labels is not None:
+            body["labels"] = dict(labels)
+        response = await self._http.request("POST", "/voices", json=body)
+        return Voice.model_validate(unwrap(response))
+
+    async def update(
+        self,
+        voice_id: str,
+        *,
+        name: Optional[str] = None,
+        description: Optional[str] = None,
+        language: Optional[str] = None,
+        labels: Optional[Mapping[str, str]] = None,
+    ) -> Voice:
+        body = _drop_none(name=name, description=description, language=language)
+        if labels is not None:
+            body["labels"] = dict(labels)
+        response = await self._http.request("PATCH", f"/voices/{path_id(voice_id)}", json=body)
+        return Voice.model_validate(unwrap(response))
+
+    async def delete(self, voice_id: str) -> None:
+        await self._http.request("DELETE", f"/voices/{path_id(voice_id)}")
+
+    async def clone(
+        self,
+        *,
+        name: str,
+        file: FileInput,
+        description: Optional[str] = None,
+        language: Optional[str] = None,
+        labels: Optional[Mapping[str, str]] = None,
+        ref_text: Optional[str] = None,
+        remove_background_noise: Optional[bool] = None,
+    ) -> CloneResult:
+        form = _clone_form(name, description, language, labels, ref_text, remove_background_noise)
+        response = await self._http.request(
+            "POST", "/voices/clone", data=form, files={"file": to_multipart(file)}
+        )
+        return CloneResult.model_validate(unwrap(response))
+
+    async def enroll(
+        self,
+        voice_id: str,
+        *,
+        file: FileInput,
+        ref_text: Optional[str] = None,
+        language: Optional[str] = None,
+    ) -> CloneResult:
+        form = _drop_none(ref_text=ref_text, language=language)
+        response = await self._http.request(
+            "POST",
+            f"/voices/{path_id(voice_id)}/enroll",
+            data=form,
+            files={"file": to_multipart(file)},
+        )
+        return CloneResult.model_validate(unwrap(response))
+
+    async def wait_until_ready(
+        self,
+        clone: CloneResult,
+        *,
+        timeout: float = DEFAULT_WAIT_TIMEOUT,
+        poll_interval: float = DEFAULT_POLL_INTERVAL,
+        on_update: Optional[Callable[[CloneJob], None]] = None,
+    ) -> Voice:
+        await self._jobs.wait(
+            clone.job_id, timeout=timeout, poll_interval=poll_interval, on_update=on_update
+        )
+        return await self.get(clone.voice.id)
+
+    async def clone_and_wait(
+        self,
+        *,
+        name: str,
+        file: FileInput,
+        description: Optional[str] = None,
+        language: Optional[str] = None,
+        labels: Optional[Mapping[str, str]] = None,
+        ref_text: Optional[str] = None,
+        remove_background_noise: Optional[bool] = None,
+        timeout: float = DEFAULT_WAIT_TIMEOUT,
+        poll_interval: float = DEFAULT_POLL_INTERVAL,
+        on_update: Optional[Callable[[CloneJob], None]] = None,
+    ) -> Voice:
+        clone = await self.clone(
+            name=name,
+            file=file,
+            description=description,
+            language=language,
+            labels=labels,
+            ref_text=ref_text,
+            remove_background_noise=remove_background_noise,
+        )
+        return await self.wait_until_ready(
+            clone, timeout=timeout, poll_interval=poll_interval, on_update=on_update
+        )
