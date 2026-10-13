@@ -9,6 +9,7 @@ import os
 import platform
 import random
 import time
+import uuid
 from typing import Any, Callable, Dict, Mapping, Optional, Union
 
 import httpx
@@ -93,6 +94,39 @@ def unwrap(response: httpx.Response) -> Any:
     return body
 
 
+def _idempotency(config: _Config, method: str, idempotent: bool) -> tuple[Mapping[str, str], str]:
+    """Headers for a request, and the method to apply the retry policy for.
+
+    An idempotent call carries one Idempotency-Key for all of its attempts (yours, if you
+    passed one in ``extra_headers``), so the server runs it at most once and every failure can
+    be retried like a read.
+    """
+    if not idempotent or method != "POST":
+        return config.headers, method
+    if any(k.lower() == "idempotency-key" for k in config.headers):
+        return config.headers, "GET"
+    return {**config.headers, "Idempotency-Key": str(uuid.uuid4())}, "GET"
+
+
+def _in_progress(response: httpx.Response) -> bool:
+    if response.status_code != 409:
+        return False
+    try:
+        body = response.json()
+    except ValueError:
+        return False
+    return isinstance(body, dict) and body.get("code") == "idempotency_in_progress"
+
+
+def _wait_budget(config: _Config) -> float:
+    t = config.timeout
+    if isinstance(t, (int, float)):
+        return float(t)
+    if isinstance(t, httpx.Timeout) and t.read is not None:
+        return float(t.read)
+    return DEFAULT_TIMEOUT.read or 120.0
+
+
 def _should_retry_error(method: str, exc: Exception) -> bool:
     return method != "POST" or isinstance(exc, _UNSENT_ERRORS)
 
@@ -168,12 +202,15 @@ class SyncHTTP:
         data: Optional[Mapping[str, Any]] = None,
         files: Any = None,
         stream: bool = False,
+        idempotent: bool = False,
     ) -> httpx.Response:
         """Send a request, retrying transient failures, and raise on an error status.
 
         With ``stream=True`` the caller must close the returned response.
         """
+        headers, retry_as = _idempotency(self.config, method, idempotent)
         attempt = 0
+        in_progress_until: Optional[float] = None
         while True:
             request = self.client.build_request(
                 method,
@@ -182,7 +219,7 @@ class SyncHTTP:
                 params=params,
                 data=data,
                 files=files,
-                headers=self.config.headers,
+                headers=headers,
                 timeout=self.config.request_timeout,
             )
             try:
@@ -195,7 +232,7 @@ class SyncHTTP:
                     finally:
                         response.close()
             except httpx.TransportError as exc:
-                if attempt < self.config.max_retries and _should_retry_error(method, exc):
+                if attempt < self.config.max_retries and _should_retry_error(retry_as, exc):
                     delay = _retry_delay(attempt, None)
                     _log_retry(request, delay, attempt, type(exc).__name__)
                     time.sleep(delay)
@@ -207,8 +244,18 @@ class SyncHTTP:
                 if self.on_response is not None:
                     self.on_response(response)
                 return response
+            if idempotent and _in_progress(response):
+                # The first attempt is still running on the server: wait for it, for
+                # as long as a single request may take, without spending a retry.
+                if in_progress_until is None:
+                    in_progress_until = time.monotonic() + _wait_budget(self.config)
+                if time.monotonic() < in_progress_until:
+                    delay = _retry_delay(0, response)
+                    _log_retry(request, delay, attempt, "idempotency_in_progress")
+                    time.sleep(delay)
+                    continue
             if attempt < self.config.max_retries and _should_retry_status(
-                method, response.status_code
+                retry_as, response.status_code
             ):
                 delay = _retry_delay(attempt, response)
                 _log_retry(request, delay, attempt, f"HTTP {response.status_code}")
@@ -259,8 +306,11 @@ class AsyncHTTP:
         data: Optional[Mapping[str, Any]] = None,
         files: Any = None,
         stream: bool = False,
+        idempotent: bool = False,
     ) -> httpx.Response:
+        headers, retry_as = _idempotency(self.config, method, idempotent)
         attempt = 0
+        in_progress_until: Optional[float] = None
         while True:
             request = self.client.build_request(
                 method,
@@ -269,7 +319,7 @@ class AsyncHTTP:
                 params=params,
                 data=data,
                 files=files,
-                headers=self.config.headers,
+                headers=headers,
                 timeout=self.config.request_timeout,
             )
             try:
@@ -282,7 +332,7 @@ class AsyncHTTP:
                     finally:
                         await response.aclose()
             except httpx.TransportError as exc:
-                if attempt < self.config.max_retries and _should_retry_error(method, exc):
+                if attempt < self.config.max_retries and _should_retry_error(retry_as, exc):
                     delay = _retry_delay(attempt, None)
                     _log_retry(request, delay, attempt, type(exc).__name__)
                     await asyncio.sleep(delay)
@@ -294,8 +344,18 @@ class AsyncHTTP:
                 if self.on_response is not None:
                     self.on_response(response)
                 return response
+            if idempotent and _in_progress(response):
+                # The first attempt is still running on the server: wait for it, for
+                # as long as a single request may take, without spending a retry.
+                if in_progress_until is None:
+                    in_progress_until = time.monotonic() + _wait_budget(self.config)
+                if time.monotonic() < in_progress_until:
+                    delay = _retry_delay(0, response)
+                    _log_retry(request, delay, attempt, "idempotency_in_progress")
+                    await asyncio.sleep(delay)
+                    continue
             if attempt < self.config.max_retries and _should_retry_status(
-                method, response.status_code
+                retry_as, response.status_code
             ):
                 delay = _retry_delay(attempt, response)
                 _log_retry(request, delay, attempt, f"HTTP {response.status_code}")

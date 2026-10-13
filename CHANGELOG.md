@@ -7,4 +7,7 @@
 - One error hierarchy over the API's error shapes; billing-safe retries with backoff.
 - Per-call `timeout`, `max_retries` and `extra_headers` on every request method.
 - `async for voice in client.voices.list()` without awaiting the first page.
-- `client.with_raw_response`, `client.with_options()` and `FINESSE_LOG` logging.
+- Creating, cloning, enrolling and synthesis send an `Idempotency-Key` and retry like reads;
+  a retry while the first attempt runs waits for it.
+- `client.with_raw_response`, `client.with_options()`, `FINESSE_LOG` logging, and
+  `request_id` on errors.

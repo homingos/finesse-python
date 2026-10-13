@@ -43,6 +43,7 @@ realtime to voice agents, with a few lines of code.
 - [Retries](#retries)
 - [Timeouts](#timeouts)
 - [Per-request options](#per-request-options)
+- [Request IDs](#request-ids)
 - [Advanced](#advanced)
 - [Requirements](#requirements)
 
@@ -351,12 +352,18 @@ except ff.APIConnectionError:
 
 ## Retries
 
-Transient failures are retried twice with exponential backoff, honouring `Retry-After`.
+Failed requests are retried twice with exponential backoff, honouring `Retry-After`: connection
+errors, timeouts, 408, 429 and 5xx.
 
-- Reads, updates and deletes retry on connection errors, timeouts, 408, 429 and 5xx.
-- Creating voices, uploading clips and synthesis can create things or cost credits, so they
-  retry only when the server certainly did no work: the connection never opened, 429, 502 or 503.
-  A synthesis that fails is refunded.
+Calls that create something or cost credits (`speech.create`, `voices.create`, `voices.clone`,
+`voices.enroll`) send an `Idempotency-Key`, the same one on every retry, so the service runs
+them at most once. A retry of a clone that already succeeded gets the first result back, and a
+retried synthesis is served from the cache at no charge. If the first attempt is still running,
+the SDK waits for it (up to the request timeout) without using up a retry. To choose the key
+yourself, pass it in `extra_headers={"Idempotency-Key": "..."}`.
+
+`speech.stream` has no key, so it is only retried when the server certainly did no work: the
+connection never opened, 429, 502 or 503.
 
 ```python
 client = Finesse(max_retries=5)  # every request
@@ -396,6 +403,18 @@ client.speech.create(
 On `jobs.wait`, `voices.wait_until_ready` and `voices.clone_and_wait`, `timeout` means the
 overall time to wait for the clone.
 
+## Request IDs
+
+Every response has an `X-Request-Id`. Errors carry it as `error.request_id`; quote it when you
+contact support.
+
+```python
+try:
+    client.voices.get("665f1a2b3c4d5e6f7a8b9c0d")
+except ff.NotFoundError as e:
+    print(e.request_id)  # "req_3f9c..."
+```
+
 ## Advanced
 
 ### Raw responses
@@ -404,13 +423,13 @@ overall time to wait for the clone.
 
 ```python
 raw = client.with_raw_response.speech.create(voice_id=voice.id, text="Hello!")
-print(raw.status_code, raw.headers["X-Sample-Rate"])
+print(raw.status_code, raw.request_id, raw.headers["X-Sample-Rate"])
 audio = raw.parse()  # what speech.create returns
 ```
 
 ### Logging
 
-Set `FINESSE_LOG=debug` to log every request (method, URL, status, timing), or
+Set `FINESSE_LOG=debug` to log every request (method, URL, status, timing, request id), or
 `FINESSE_LOG=info` to log only retries. The SDK logs to the standard `logging` module under the
 `flam_finesse` logger, so you can also configure it yourself. It never logs your API key,
 request bodies or audio.

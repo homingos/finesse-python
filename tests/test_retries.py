@@ -70,18 +70,96 @@ def test_retry_delay(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _retry_delay(0, httpx.Response(429, headers={"Retry-After": "soon"})) == 0.5
 
 
-def test_post_not_retried_when_server_may_have_worked(make_client) -> None:
+def test_unkeyed_post_not_retried_when_server_may_have_worked(make_client) -> None:
+    # Speech streams carry no Idempotency-Key, so a failure after sending is not retried.
     client, rec = make_client(error(500, "boom"))
     with pytest.raises(ff.InternalServerError):
-        client.speech.create(voice_id=VOICE["id"], text="hi")
+        client.speech.stream(voice_id=VOICE["id"], text="hi").read_all()
     assert len(rec.requests) == 1
-    client, rec = make_client(httpx.ReadTimeout("slow"))
-    with pytest.raises(ff.APITimeoutError):
+    assert "Idempotency-Key" not in rec.requests[0].headers
+
+
+def test_keyed_posts_retry_with_one_key(make_client) -> None:
+    ok = httpx.Response(200, content=b"RIFF")
+    client, rec = make_client(error(500, "boom"), httpx.ReadTimeout("slow"), ok)
+    client.speech.create(voice_id=VOICE["id"], text="hi")
+    keys = [r.headers.get("Idempotency-Key") for r in rec.requests]
+    assert len(keys) == 3 and keys[0] and len(set(keys)) == 1
+    client2, rec2 = make_client(error(504, "gw"), envelope(VOICE, 201))
+    client2.voices.create(name="x")
+    assert len(rec2.requests) == 2
+    # A new call gets a new key.
+    client3, rec3 = make_client(
+        httpx.Response(200, content=b"A"), httpx.Response(200, content=b"B")
+    )
+    client3.speech.create(voice_id=VOICE["id"], text="a")
+    client3.speech.create(voice_id=VOICE["id"], text="b")
+    assert (
+        rec3.requests[0].headers["Idempotency-Key"] != rec3.requests[1].headers["Idempotency-Key"]
+    )
+
+
+def test_caller_key_is_used(make_client) -> None:
+    client, rec = make_client(error(503, "busy"), envelope(VOICE, 201))
+    client.voices.create(name="x", extra_headers={"Idempotency-Key": "mine-123"})
+    assert [r.headers["Idempotency-Key"] for r in rec.requests] == ["mine-123", "mine-123"]
+
+
+def in_progress() -> httpx.Response:
+    return httpx.Response(
+        409,
+        json={
+            "status": 409,
+            "error": True,
+            "code": "idempotency_in_progress",
+            "message": "running",
+        },
+        headers={"Retry-After": "1", "X-Request-Id": "req_ip"},
+    )
+
+
+def test_waits_while_the_first_attempt_runs(make_client) -> None:
+    # More in-progress answers than max_retries: waiting must not spend retries.
+    # After three waits a 503 must still be retried.
+    client, rec = make_client(
+        httpx.ReadTimeout("slow"),
+        in_progress(),
+        in_progress(),
+        in_progress(),
+        error(503, "busy"),
+        envelope(VOICE, 201),
+    )
+    client.voices.create(name="x")
+    assert len(rec.requests) == 6
+    assert len({r.headers["Idempotency-Key"] for r in rec.requests}) == 1
+
+
+def test_gives_up_waiting_after_the_timeout(make_client, monkeypatch) -> None:
+    import flam_finesse._base as base
+
+    clock = iter([0.0, 0.0, 50.0, 200.0, 400.0])
+    monkeypatch.setattr(base.time, "monotonic", lambda: next(clock, 1000.0))
+    client, _ = make_client(in_progress(), in_progress(), in_progress(), timeout=120.0)
+    with pytest.raises(ff.APIStatusError) as info:
         client.voices.create(name="x")
+    assert info.value.status_code == 409
+    assert info.value.code == "idempotency_in_progress"
+    assert info.value.request_id == "req_ip"
+
+
+def test_unkeyed_409_is_not_waited_on(make_client) -> None:
+    client, rec = make_client(in_progress())
+    with pytest.raises(ff.APIStatusError):
+        client.voices.get(VOICE["id"])
     assert len(rec.requests) == 1
-    client, rec = make_client(error(504, "gateway"))
-    with pytest.raises(ff.InternalServerError):
-        client.speech.create(voice_id=VOICE["id"], text="hi")
+
+
+def test_reused_key_error(make_client) -> None:
+    body = {"status": 422, "error": True, "code": "idempotency_key_reused", "message": "different"}
+    client, rec = make_client(httpx.Response(422, json=body))
+    with pytest.raises(ff.APIStatusError) as info:
+        client.voices.create(name="x", extra_headers={"Idempotency-Key": "k"})
+    assert info.value.code == "idempotency_key_reused"
     assert len(rec.requests) == 1
 
 
@@ -126,3 +204,9 @@ def test_timeouts() -> None:
     assert seen[1]["read"] == 3.0
     own = Finesse(api_key="k", base_url="https://x")
     assert own._http.client.timeout.read == 120.0 and own._http.client.timeout.connect == 10.0
+
+
+async def test_async_keyed_retry(make_async_client) -> None:
+    client, rec = make_async_client(error(500, "x"), in_progress(), envelope(VOICE, 201))
+    await client.voices.create(name="x")
+    assert len(rec.requests) == 3 and len({r.headers["Idempotency-Key"] for r in rec.requests}) == 1

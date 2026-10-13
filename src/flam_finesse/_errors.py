@@ -72,6 +72,7 @@ class APIStatusError(FinesseError):
             ``too_many_sessions``), else ``None``.
         body: The decoded JSON body, or the raw text when it is not JSON.
         billing_remaining: ``X-Billing-Remaining`` header as an int, when sent.
+        request_id: The service's ``X-Request-Id``, when sent.
     """
 
     def __init__(self, message: str, *, response: httpx.Response, body: Any, code: Optional[str]):
@@ -82,6 +83,8 @@ class APIStatusError(FinesseError):
         self.body = body
         self.code = code
         self.billing_remaining = _int_header(response, "X-Billing-Remaining")
+        self.request_id: Optional[str] = response.headers.get("X-Request-Id")
+        """The service's ``X-Request-Id`` for the failed request; quote it to support."""
 
     @property
     def limit(self) -> Optional[int]:
@@ -191,7 +194,9 @@ def make_status_error(response: httpx.Response) -> APIStatusError:
             # The credit check inside synthesis sends the code as the message.
             if msg.replace("_", "").isalpha() and "_" in msg and msg.islower():
                 code = msg
-        if isinstance(err, str) and err:
+        if isinstance(body.get("code"), str) and body["code"]:
+            code = body["code"]
+        elif isinstance(err, str) and err:
             code = "plan_limit_reached" if err == "plan limit reached" else err
             message = message or err.replace("_", " ")
         elif isinstance(err, dict):  # OpenAI-style {"error": {...}}

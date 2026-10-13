@@ -276,7 +276,7 @@ class Speech:
         """
         body = _speech_body(text, language, output_format, sample_rate, num_step)
         response = self._http.with_options(timeout, max_retries, extra_headers).request(
-            "POST", f"/voices/{path_id(voice_id)}/speak", json=body
+            "POST", f"/voices/{path_id(voice_id)}/speak", json=body, idempotent=True
         )
         return _audio(response)
 
@@ -328,7 +328,7 @@ class AsyncSpeech:
     ) -> Audio:
         body = _speech_body(text, language, output_format, sample_rate, num_step)
         response = await self._http.with_options(timeout, max_retries, extra_headers).request(
-            "POST", f"/voices/{path_id(voice_id)}/speak", json=body
+            "POST", f"/voices/{path_id(voice_id)}/speak", json=body, idempotent=True
         )
         return _audio(response)
 

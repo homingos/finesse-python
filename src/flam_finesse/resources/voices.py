@@ -97,7 +97,7 @@ class Voices:
         return Voice.model_validate(
             unwrap(
                 self._http.with_options(timeout, max_retries, extra_headers).request(
-                    "POST", "/voices", json=body
+                    "POST", "/voices", json=body, idempotent=True
                 )
             )
         )
@@ -156,7 +156,11 @@ class Voices:
         can speak, or :meth:`clone_and_wait` to do both."""
         form = _clone_form(name, description, language, labels, ref_text, remove_background_noise)
         response = self._http.with_options(timeout, max_retries, extra_headers).request(
-            "POST", "/voices/clone", data=form, files={"file": to_multipart(file)}
+            "POST",
+            "/voices/clone",
+            data=form,
+            files={"file": to_multipart(file)},
+            idempotent=True,
         )
         return CloneResult.model_validate(unwrap(response))
 
@@ -179,6 +183,7 @@ class Voices:
             f"/voices/{path_id(voice_id)}/enroll",
             data=form,
             files={"file": to_multipart(file)},
+            idempotent=True,
         )
         return CloneResult.model_validate(unwrap(response))
 
@@ -286,7 +291,7 @@ class AsyncVoices:
         if labels is not None:
             body["labels"] = dict(labels)
         response = await self._http.with_options(timeout, max_retries, extra_headers).request(
-            "POST", "/voices", json=body
+            "POST", "/voices", json=body, idempotent=True
         )
         return Voice.model_validate(unwrap(response))
 
@@ -338,7 +343,11 @@ class AsyncVoices:
     ) -> CloneResult:
         form = _clone_form(name, description, language, labels, ref_text, remove_background_noise)
         response = await self._http.with_options(timeout, max_retries, extra_headers).request(
-            "POST", "/voices/clone", data=form, files={"file": to_multipart(file)}
+            "POST",
+            "/voices/clone",
+            data=form,
+            files={"file": to_multipart(file)},
+            idempotent=True,
         )
         return CloneResult.model_validate(unwrap(response))
 
@@ -359,6 +368,7 @@ class AsyncVoices:
             f"/voices/{path_id(voice_id)}/enroll",
             data=form,
             files={"file": to_multipart(file)},
+            idempotent=True,
         )
         return CloneResult.model_validate(unwrap(response))
 
