@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from types import TracebackType
-from typing import Mapping, Optional, Type
+from typing import Any, Dict, Mapping, Optional, Type
 
 import httpx
 
 from ._base import DEFAULT_MAX_RETRIES, AsyncHTTP, SyncHTTP, TimeoutTypes, _Config
+from ._raw import RawClient
 from .realtime import AsyncRealtime
 from .resources import AsyncJobs, AsyncSpeech, AsyncVoices, Jobs, Speech, Voices
 
@@ -56,9 +57,41 @@ class Finesse:
             default_headers=default_headers,
         )
         self._http = SyncHTTP(self._config, http_client)
-        self.jobs = Jobs(self._http)
-        self.voices = Voices(self._http, self.jobs)
-        self.speech = Speech(self._http)
+        self._attach()
+
+    def _attach(self) -> None:
+        resources = _sync_resources(self._http)
+        self.jobs, self.voices, self.speech = (
+            resources["jobs"],
+            resources["voices"],
+            resources["speech"],
+        )
+
+    def with_options(
+        self,
+        *,
+        timeout: TimeoutTypes = None,
+        max_retries: Optional[int] = None,
+        default_headers: Optional[Mapping[str, str]] = None,
+    ) -> Finesse:
+        """A copy of this client with different defaults. It shares the connection pool, so
+        it is cheap to make; close the original, not the copy."""
+        clone = object.__new__(Finesse)
+        clone._http = self._http.with_options(timeout, max_retries, default_headers)
+        clone._config = clone._http.config
+        clone._attach()
+        return clone
+
+    @property
+    def with_raw_response(self) -> RawClient:
+        """The same calls, each returning a :class:`~flam_finesse.RawResponse` with the HTTP
+        status and headers::
+
+            raw = client.with_raw_response.voices.get(voice_id)
+            print(raw.status_code, raw.request_id)
+            voice = raw.parse()
+        """
+        return RawClient(self._http, _sync_resources, is_async=False)
 
     @property
     def base_url(self) -> str:
@@ -107,10 +140,35 @@ class AsyncFinesse:
             default_headers=default_headers,
         )
         self._http = AsyncHTTP(self._config, http_client)
-        self.jobs = AsyncJobs(self._http)
-        self.voices = AsyncVoices(self._http, self.jobs)
-        self.speech = AsyncSpeech(self._http)
-        self.realtime = AsyncRealtime(self._config)
+        self._attach()
+
+    def _attach(self) -> None:
+        resources = _async_resources(self._http)
+        self.jobs, self.voices, self.speech = (
+            resources["jobs"],
+            resources["voices"],
+            resources["speech"],
+        )
+        self.realtime = AsyncRealtime(self._http.config)
+
+    def with_options(
+        self,
+        *,
+        timeout: TimeoutTypes = None,
+        max_retries: Optional[int] = None,
+        default_headers: Optional[Mapping[str, str]] = None,
+    ) -> AsyncFinesse:
+        """A copy of this client with different defaults, sharing the connection pool."""
+        clone = object.__new__(AsyncFinesse)
+        clone._http = self._http.with_options(timeout, max_retries, default_headers)
+        clone._config = clone._http.config
+        clone._attach()
+        return clone
+
+    @property
+    def with_raw_response(self) -> RawClient:
+        """The same calls, each returning a :class:`~flam_finesse.RawResponse` (await them)."""
+        return RawClient(self._http, _async_resources, is_async=True)
 
     @property
     def base_url(self) -> str:
@@ -129,3 +187,13 @@ class AsyncFinesse:
         tb: Optional[TracebackType],
     ) -> None:
         await self.close()
+
+
+def _sync_resources(http: Any) -> Dict[str, Any]:
+    jobs = Jobs(http)
+    return {"jobs": jobs, "voices": Voices(http, jobs), "speech": Speech(http)}
+
+
+def _async_resources(http: Any) -> Dict[str, Any]:
+    jobs = AsyncJobs(http)
+    return {"jobs": jobs, "voices": AsyncVoices(http, jobs), "speech": AsyncSpeech(http)}

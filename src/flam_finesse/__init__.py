@@ -22,6 +22,7 @@ from ._errors import (
     StreamError,
 )
 from ._pagination import AsyncVoicePage, AsyncVoicePageRequest, VoicePage
+from ._raw import RawResponse
 from ._version import __version__
 from .realtime import (
     AudioEvent,
@@ -49,6 +50,7 @@ __all__ = [
     "CloneJob",
     "CloneResult",
     "Audio",
+    "RawResponse",
     "AudioChunk",
     "StreamDone",
     "SpeechStream",

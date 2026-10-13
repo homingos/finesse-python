@@ -9,11 +9,12 @@ import os
 import platform
 import random
 import time
-from typing import Any, Dict, Mapping, Optional, Union
+from typing import Any, Callable, Dict, Mapping, Optional, Union
 
 import httpx
 
 from ._errors import APIConnectionError, APITimeoutError, FinesseError, make_status_error
+from ._logging import logger
 from ._version import __version__
 
 DEFAULT_BASE_URL = "https://fi.production.flamapis.com"
@@ -106,6 +107,32 @@ def _transport_error(exc: httpx.TransportError, request: httpx.Request) -> APICo
     return APIConnectionError(str(exc) or "Connection error.", request=request)
 
 
+def _log_response(
+    request: httpx.Request, response: httpx.Response, started: float, attempt: int
+) -> None:
+    if logger.isEnabledFor(10):  # DEBUG
+        logger.debug(
+            "%s %s -> %s in %.0f ms%s (request id %s)",
+            request.method,
+            request.url.copy_with(query=None),
+            response.status_code,
+            (time.monotonic() - started) * 1000,
+            f", attempt {attempt + 1}" if attempt else "",
+            response.headers.get("X-Request-Id", "-"),
+        )
+
+
+def _log_retry(request: httpx.Request, delay: float, attempt: int, reason: str) -> None:
+    logger.info(
+        "retrying %s %s in %.2f s (attempt %d failed: %s)",
+        request.method,
+        request.url.copy_with(query=None),
+        delay,
+        attempt + 1,
+        reason,
+    )
+
+
 def _retry_delay(attempt: int, response: Optional[httpx.Response]) -> float:
     if response is not None:
         retry_after = response.headers.get("Retry-After")
@@ -129,6 +156,7 @@ class SyncHTTP:
         self.config = config
         self._owns_client = http_client is None
         self.client = http_client or httpx.Client(timeout=config.timeout or DEFAULT_TIMEOUT)
+        self.on_response: Optional[Callable[[httpx.Response], None]] = None
 
     def request(
         self,
@@ -158,7 +186,9 @@ class SyncHTTP:
                 timeout=self.config.request_timeout,
             )
             try:
+                started = time.monotonic()
                 response = self.client.send(request, stream=stream)
+                _log_response(request, response, started, attempt)
                 if response.status_code >= 400 and stream:
                     try:
                         response.read()
@@ -166,17 +196,23 @@ class SyncHTTP:
                         response.close()
             except httpx.TransportError as exc:
                 if attempt < self.config.max_retries and _should_retry_error(method, exc):
-                    time.sleep(_retry_delay(attempt, None))
+                    delay = _retry_delay(attempt, None)
+                    _log_retry(request, delay, attempt, type(exc).__name__)
+                    time.sleep(delay)
                     attempt += 1
                     continue
                 raise _transport_error(exc, request) from exc
 
             if response.status_code < 400:
+                if self.on_response is not None:
+                    self.on_response(response)
                 return response
             if attempt < self.config.max_retries and _should_retry_status(
                 method, response.status_code
             ):
-                time.sleep(_retry_delay(attempt, response))
+                delay = _retry_delay(attempt, response)
+                _log_retry(request, delay, attempt, f"HTTP {response.status_code}")
+                time.sleep(delay)
                 attempt += 1
                 continue
             raise make_status_error(response)
@@ -211,6 +247,7 @@ class AsyncHTTP:
         self.config = config
         self._owns_client = http_client is None
         self.client = http_client or httpx.AsyncClient(timeout=config.timeout or DEFAULT_TIMEOUT)
+        self.on_response: Optional[Callable[[httpx.Response], None]] = None
 
     async def request(
         self,
@@ -236,7 +273,9 @@ class AsyncHTTP:
                 timeout=self.config.request_timeout,
             )
             try:
+                started = time.monotonic()
                 response = await self.client.send(request, stream=stream)
+                _log_response(request, response, started, attempt)
                 if response.status_code >= 400 and stream:
                     try:
                         await response.aread()
@@ -244,17 +283,23 @@ class AsyncHTTP:
                         await response.aclose()
             except httpx.TransportError as exc:
                 if attempt < self.config.max_retries and _should_retry_error(method, exc):
-                    await asyncio.sleep(_retry_delay(attempt, None))
+                    delay = _retry_delay(attempt, None)
+                    _log_retry(request, delay, attempt, type(exc).__name__)
+                    await asyncio.sleep(delay)
                     attempt += 1
                     continue
                 raise _transport_error(exc, request) from exc
 
             if response.status_code < 400:
+                if self.on_response is not None:
+                    self.on_response(response)
                 return response
             if attempt < self.config.max_retries and _should_retry_status(
                 method, response.status_code
             ):
-                await asyncio.sleep(_retry_delay(attempt, response))
+                delay = _retry_delay(attempt, response)
+                _log_retry(request, delay, attempt, f"HTTP {response.status_code}")
+                await asyncio.sleep(delay)
                 attempt += 1
                 continue
             raise make_status_error(response)
