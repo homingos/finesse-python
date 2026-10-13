@@ -104,3 +104,19 @@ def test_5xx_is_internal_server_error(make_client) -> None:
     client, _ = make_client(error(502, "warming up"), max_retries=0)
     with pytest.raises(ff.InternalServerError):
         client.voices.get(VOICE["id"])
+
+
+def test_html_error_page_is_truncated(make_client) -> None:
+    page = "<html><body>" + "Bad gateway " * 200 + "</body></html>"
+    client, _ = make_client(httpx.Response(502, text=page), max_retries=0)
+    with pytest.raises(ff.InternalServerError) as info:
+        client.voices.get(VOICE["id"])
+    assert len(info.value.message) <= 300 and info.value.message.endswith("...")
+    assert info.value.body == page
+
+
+def test_openai_shape_with_odd_types(make_client) -> None:
+    client, _ = make_client(httpx.Response(400, json={"error": {"message": 5, "code": None}}))
+    with pytest.raises(ff.BadRequestError) as info:
+        client.voices.get(VOICE["id"])
+    assert isinstance(info.value.message, str)

@@ -23,6 +23,17 @@ from ._errors import (
 )
 from ._pagination import AsyncVoicePage, VoicePage
 from ._version import __version__
+from .realtime import (
+    AudioEvent,
+    RealtimeContext,
+    RealtimeError,
+    RealtimeEvent,
+    RealtimeSession,
+    SentenceDone,
+    TaskCancelled,
+    TaskDone,
+    TaskStarted,
+)
 from .resources import AsyncSpeechStream, SpeechStream
 from .types import Audio, AudioChunk, CloneJob, CloneResult, StreamDone, Voice, VoiceSettings
 
@@ -55,4 +66,13 @@ __all__ = [
     "StreamError",
     "CloneFailedError",
     "CloneTimeoutError",
+    "RealtimeSession",
+    "RealtimeContext",
+    "RealtimeError",
+    "RealtimeEvent",
+    "TaskStarted",
+    "AudioEvent",
+    "SentenceDone",
+    "TaskDone",
+    "TaskCancelled",
 ]

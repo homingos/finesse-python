@@ -136,3 +136,34 @@ def test_sse_multiline_data_and_comments() -> None:
 
     lines = [": keepalive", "event: x", "data: a", "data: b", "", "data: tail"]
     assert [tuple(e) for e in iter_sse(iter(lines))] == [("x", "a\nb"), ("message", "tail")]
+
+
+class _Broken(httpx.SyncByteStream):
+    def __iter__(self):  # type: ignore[no-untyped-def]
+        yield b'event: start\ndata: {"type":"start","sample_rate":24000}\n\n'
+        raise httpx.ReadError("connection reset")
+
+
+def test_stream_transport_error_is_wrapped(make_client) -> None:
+    client, _ = make_client(httpx.Response(200, stream=_Broken()))
+    with pytest.raises(ff.APIConnectionError):
+        list(client.speech.stream(voice_id=VID, text="Hi"))
+
+
+def test_stream_bad_chunk_and_odd_payloads(make_client) -> None:
+    text = (
+        "event: start\ndata: [1, 2]\n\n"
+        'event: chunk\ndata: {"type":"chunk","audio_b64":"!!!not base64"}\n\n'
+    )
+    client, _ = make_client(httpx.Response(200, content=text.encode()))
+    with pytest.raises(ff.StreamError) as info:
+        list(client.speech.stream(voice_id=VID, text="Hi"))
+    assert info.value.code == "bad_chunk"
+
+
+def test_stream_cannot_be_consumed_twice(make_client) -> None:
+    client, _ = make_client(sse(START, chunk(b"ab", 0), DONE))
+    stream = client.speech.stream(voice_id=VID, text="Hi")
+    assert stream.read_all() == b"ab"
+    with pytest.raises(ff.FinesseError, match="already consumed"):
+        stream.read_all()

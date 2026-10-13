@@ -5,7 +5,8 @@ from typing import Mapping, Optional, Type
 
 import httpx
 
-from ._base import DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT, AsyncHTTP, SyncHTTP, TimeoutTypes, _Config
+from ._base import DEFAULT_MAX_RETRIES, AsyncHTTP, SyncHTTP, TimeoutTypes, _Config
+from .realtime import AsyncRealtime
 from .resources import AsyncJobs, AsyncSpeech, AsyncVoices, Jobs, Speech, Voices
 
 
@@ -15,8 +16,12 @@ class Finesse:
     Args:
         api_key: Workspace API key (``flv_...``). Defaults to ``FINESSE_API_KEY``.
         base_url: API host. Defaults to ``FINESSE_BASE_URL``, then production.
-        timeout: Seconds, or an ``httpx.Timeout``. Default 120 s (10 s to connect).
-        max_retries: Retries for connection errors, timeouts, 408/409/429 and 5xx. Default 2.
+        timeout: Seconds, or an ``httpx.Timeout``. Default 120 s (10 s to connect), or the
+            timeout of your ``http_client``.
+        max_retries: Retries for transient failures. Default 2. Reads, updates and deletes
+            retry on connection errors, timeouts, 408, 429 and 5xx. Creates, uploads and
+            synthesis retry only when the server did no work: the connection never opened,
+            429, 502 or 503.
         default_headers: Extra headers sent on every request.
         http_client: Your own ``httpx.Client`` (proxies, custom transports). You close it.
 
@@ -38,7 +43,7 @@ class Finesse:
         *,
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
-        timeout: TimeoutTypes = DEFAULT_TIMEOUT,
+        timeout: TimeoutTypes = None,
         max_retries: int = DEFAULT_MAX_RETRIES,
         default_headers: Optional[Mapping[str, str]] = None,
         http_client: Optional[httpx.Client] = None,
@@ -82,13 +87,14 @@ class AsyncFinesse:
     voices: AsyncVoices
     jobs: AsyncJobs
     speech: AsyncSpeech
+    realtime: AsyncRealtime
 
     def __init__(
         self,
         *,
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
-        timeout: TimeoutTypes = DEFAULT_TIMEOUT,
+        timeout: TimeoutTypes = None,
         max_retries: int = DEFAULT_MAX_RETRIES,
         default_headers: Optional[Mapping[str, str]] = None,
         http_client: Optional[httpx.AsyncClient] = None,
@@ -104,6 +110,7 @@ class AsyncFinesse:
         self.jobs = AsyncJobs(self._http)
         self.voices = AsyncVoices(self._http, self.jobs)
         self.speech = AsyncSpeech(self._http)
+        self.realtime = AsyncRealtime(self._config)
 
     @property
     def base_url(self) -> str:

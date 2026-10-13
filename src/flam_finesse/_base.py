@@ -22,11 +22,19 @@ DEFAULT_TIMEOUT = httpx.Timeout(120.0, connect=10.0)
 DEFAULT_MAX_RETRIES = 2
 CLIENT_NAME = f"flam-finesse-python/{__version__}"
 
-# 408/409 are transient; 429 is the engine's rate limit; 5xx are server or engine hiccups.
-_RETRY_STATUSES = frozenset({408, 409, 429, 500, 502, 503, 504})
+# GET/PATCH/DELETE are safe to repeat: retry timeouts, 429 (the engine's rate limit) and 5xx.
+_RETRY_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
+# POSTs create voices and bill synthesis. Only retry when the server certainly did nothing:
+# 429, 502 (engine unavailable or warming up; failed synthesis is refunded) and 503, or when
+# the connection never opened. A timeout after the request was sent is not retried, because
+# the server may have finished (and billed) it.
+_POST_RETRY_STATUSES = frozenset({429, 502, 503})
+_UNSENT_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
 _MAX_BACKOFF = 8.0
 
 TimeoutTypes = Union[float, httpx.Timeout, None]
+"""Seconds or an ``httpx.Timeout``. ``None`` means the default: 120 s (10 s to connect), or the
+timeout of an ``http_client`` you pass. Use ``httpx.Timeout(None)`` to disable timeouts."""
 
 
 class _Config:
@@ -58,6 +66,11 @@ class _Config:
         if default_headers:
             self.headers.update(default_headers)
 
+    @property
+    def request_timeout(self) -> Any:
+        """Per-request timeout: the one set on this SDK client, else the HTTP client's."""
+        return self.timeout if self.timeout is not None else httpx.USE_CLIENT_DEFAULT
+
     def url(self, path: str) -> str:
         return f"{self.base_url}{API_PREFIX}{path}"
 
@@ -76,6 +89,20 @@ def unwrap(response: httpx.Response) -> Any:
     if isinstance(body, dict) and "data" in body and body.get("error") is False:
         return body["data"]
     return body
+
+
+def _should_retry_error(method: str, exc: Exception) -> bool:
+    return method != "POST" or isinstance(exc, _UNSENT_ERRORS)
+
+
+def _should_retry_status(method: str, status: int) -> bool:
+    return status in (_POST_RETRY_STATUSES if method == "POST" else _RETRY_STATUSES)
+
+
+def _transport_error(exc: httpx.TransportError, request: httpx.Request) -> APIConnectionError:
+    if isinstance(exc, httpx.TimeoutException):
+        return APITimeoutError(request=request)
+    return APIConnectionError(str(exc) or "Connection error.", request=request)
 
 
 def _retry_delay(attempt: int, response: Optional[httpx.Response]) -> float:
@@ -100,7 +127,7 @@ class SyncHTTP:
     def __init__(self, config: _Config, http_client: Optional[httpx.Client]) -> None:
         self.config = config
         self._owns_client = http_client is None
-        self.client = http_client or httpx.Client(timeout=config.timeout)
+        self.client = http_client or httpx.Client(timeout=config.timeout or DEFAULT_TIMEOUT)
 
     def request(
         self,
@@ -127,29 +154,27 @@ class SyncHTTP:
                 data=data,
                 files=files,
                 headers=self.config.headers,
-                timeout=self.config.timeout,
+                timeout=self.config.request_timeout,
             )
             try:
                 response = self.client.send(request, stream=stream)
-            except httpx.TimeoutException as exc:
-                if attempt < self.config.max_retries:
-                    time.sleep(_retry_delay(attempt, None))
-                    attempt += 1
-                    continue
-                raise APITimeoutError(request=request) from exc
+                if response.status_code >= 400 and stream:
+                    try:
+                        response.read()
+                    finally:
+                        response.close()
             except httpx.TransportError as exc:
-                if attempt < self.config.max_retries:
+                if attempt < self.config.max_retries and _should_retry_error(method, exc):
                     time.sleep(_retry_delay(attempt, None))
                     attempt += 1
                     continue
-                raise APIConnectionError(str(exc) or "Connection error.", request=request) from exc
+                raise _transport_error(exc, request) from exc
 
             if response.status_code < 400:
                 return response
-            if stream:
-                response.read()
-                response.close()
-            if response.status_code in _RETRY_STATUSES and attempt < self.config.max_retries:
+            if attempt < self.config.max_retries and _should_retry_status(
+                method, response.status_code
+            ):
                 time.sleep(_retry_delay(attempt, response))
                 attempt += 1
                 continue
@@ -164,7 +189,7 @@ class AsyncHTTP:
     def __init__(self, config: _Config, http_client: Optional[httpx.AsyncClient]) -> None:
         self.config = config
         self._owns_client = http_client is None
-        self.client = http_client or httpx.AsyncClient(timeout=config.timeout)
+        self.client = http_client or httpx.AsyncClient(timeout=config.timeout or DEFAULT_TIMEOUT)
 
     async def request(
         self,
@@ -187,29 +212,27 @@ class AsyncHTTP:
                 data=data,
                 files=files,
                 headers=self.config.headers,
-                timeout=self.config.timeout,
+                timeout=self.config.request_timeout,
             )
             try:
                 response = await self.client.send(request, stream=stream)
-            except httpx.TimeoutException as exc:
-                if attempt < self.config.max_retries:
-                    await asyncio.sleep(_retry_delay(attempt, None))
-                    attempt += 1
-                    continue
-                raise APITimeoutError(request=request) from exc
+                if response.status_code >= 400 and stream:
+                    try:
+                        await response.aread()
+                    finally:
+                        await response.aclose()
             except httpx.TransportError as exc:
-                if attempt < self.config.max_retries:
+                if attempt < self.config.max_retries and _should_retry_error(method, exc):
                     await asyncio.sleep(_retry_delay(attempt, None))
                     attempt += 1
                     continue
-                raise APIConnectionError(str(exc) or "Connection error.", request=request) from exc
+                raise _transport_error(exc, request) from exc
 
             if response.status_code < 400:
                 return response
-            if stream:
-                await response.aread()
-                await response.aclose()
-            if response.status_code in _RETRY_STATUSES and attempt < self.config.max_retries:
+            if attempt < self.config.max_retries and _should_retry_status(
+                method, response.status_code
+            ):
                 await asyncio.sleep(_retry_delay(attempt, response))
                 attempt += 1
                 continue

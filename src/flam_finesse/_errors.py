@@ -162,6 +162,8 @@ class CloneTimeoutError(FinesseError):
         self.timeout = timeout
 
 
+_MAX_MESSAGE = 300
+
 _STATUS_ERRORS: dict[int, type[APIStatusError]] = {
     400: BadRequestError,
     401: AuthenticationError,
@@ -193,10 +195,14 @@ def make_status_error(response: httpx.Response) -> APIStatusError:
             code = "plan_limit_reached" if err == "plan limit reached" else err
             message = message or err.replace("_", " ")
         elif isinstance(err, dict):  # OpenAI-style {"error": {...}}
-            message = err.get("message") or message
-            code = err.get("code") or code
+            if isinstance(err.get("message"), str):
+                message = err["message"] or message
+            if isinstance(err.get("code"), str):
+                code = err["code"] or code
     elif isinstance(body, str) and body.strip():
-        message = body.strip()
+        # A proxy's HTML error page can be long; keep the message readable.
+        text = " ".join(body.split())
+        message = text if len(text) <= _MAX_MESSAGE else text[: _MAX_MESSAGE - 3] + "..."
 
     if not message:
         message = response.reason_phrase or f"HTTP {response.status_code}"

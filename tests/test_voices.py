@@ -120,8 +120,9 @@ def test_clone_from_path_and_bytes(make_client, tmp_path) -> None:
     client.voices.clone(name="a", file=clip)
     assert b'filename="me.mp3"' in rec.requests[0].content
     assert b"Content-Type: audio/mpeg" in rec.requests[0].content
-    client.voices.clone(name="b", file=b"raw")
+    client.voices.clone(name="b", file=b"RAWCLIP")
     assert b'filename="audio.wav"' in rec.requests[1].content
+    assert b"RAWCLIP" in rec.requests[1].content
 
 
 def test_text_mode_file_rejected(make_client, tmp_path) -> None:

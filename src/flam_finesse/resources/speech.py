@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import json
 from types import TracebackType
 from typing import Any, AsyncIterator, Dict, Iterator, Optional, Type
 
 import httpx
 
-from .._base import AsyncHTTP, SyncHTTP
-from .._errors import StreamError
+from .._base import AsyncHTTP, SyncHTTP, _transport_error
+from .._errors import FinesseError, StreamError
 from .._sse import SSEEvent, aiter_sse, iter_sse
 from .._util import path_id
 from ..types import Audio, AudioChunk, StreamDone
@@ -67,13 +68,21 @@ class _StreamState:
             payload = json.loads(ev.data) if ev.data else {}
         except ValueError:
             return None
+        if not isinstance(payload, dict):
+            return None
         kind = payload.get("type") or ev.event
         if kind == "start":
             self.sample_rate = payload.get("sample_rate", self.sample_rate)
             self.audio_format = payload.get("audio_format", self.audio_format)
         elif kind == "chunk":
+            try:
+                pcm = base64.b64decode(payload.get("audio_b64") or "", validate=True)
+            except (binascii.Error, ValueError) as exc:
+                raise StreamError(
+                    "bad_chunk", "The stream sent an undecodable audio chunk."
+                ) from exc
             return AudioChunk(
-                pcm=base64.b64decode(payload.get("audio_b64") or ""),
+                pcm=pcm,
                 sample_rate=payload.get("sample_rate", self.sample_rate),
                 audio_format=payload.get("audio_format", self.audio_format),
                 index=payload.get("index"),
@@ -103,6 +112,7 @@ class SpeechStream:
         self._body = body
         self._response: Optional[httpx.Response] = None
         self._state = _StreamState()
+        self._consumed = False
 
     @property
     def sample_rate(self) -> Optional[int]:
@@ -128,6 +138,9 @@ class SpeechStream:
         return self._response
 
     def __iter__(self) -> Iterator[AudioChunk]:
+        if self._consumed:
+            raise FinesseError("This stream was already consumed; start a new one.")
+        self._consumed = True
         response = self._open()
         try:
             for ev in iter_sse(response.iter_lines()):
@@ -135,6 +148,8 @@ class SpeechStream:
                 if chunk is not None:
                     yield chunk
             self._state.finish()
+        except httpx.TransportError as exc:
+            raise _transport_error(exc, response.request) from exc
         finally:
             self.close()
 
@@ -168,6 +183,7 @@ class AsyncSpeechStream:
         self._body = body
         self._response: Optional[httpx.Response] = None
         self._state = _StreamState()
+        self._consumed = False
 
     @property
     def sample_rate(self) -> Optional[int]:
@@ -194,6 +210,9 @@ class AsyncSpeechStream:
         return self._response
 
     async def __aiter__(self) -> AsyncIterator[AudioChunk]:
+        if self._consumed:
+            raise FinesseError("This stream was already consumed; start a new one.")
+        self._consumed = True
         response = await self._open()
         try:
             async for ev in aiter_sse(response.aiter_lines()):
@@ -201,6 +220,8 @@ class AsyncSpeechStream:
                 if chunk is not None:
                     yield chunk
             self._state.finish()
+        except httpx.TransportError as exc:
+            raise _transport_error(exc, response.request) from exc
         finally:
             await self.close()
 

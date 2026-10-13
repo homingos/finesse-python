@@ -68,3 +68,61 @@ def test_retry_delay(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _retry_delay(0, resp) == 3.0
     assert _retry_delay(0, httpx.Response(429, headers={"Retry-After": "999"})) == 0.5
     assert _retry_delay(0, httpx.Response(429, headers={"Retry-After": "soon"})) == 0.5
+
+
+def test_post_not_retried_when_server_may_have_worked(make_client) -> None:
+    client, rec = make_client(error(500, "boom"))
+    with pytest.raises(ff.InternalServerError):
+        client.speech.create(voice_id=VOICE["id"], text="hi")
+    assert len(rec.requests) == 1
+    client, rec = make_client(httpx.ReadTimeout("slow"))
+    with pytest.raises(ff.APITimeoutError):
+        client.voices.create(name="x")
+    assert len(rec.requests) == 1
+    client, rec = make_client(error(504, "gateway"))
+    with pytest.raises(ff.InternalServerError):
+        client.speech.create(voice_id=VOICE["id"], text="hi")
+    assert len(rec.requests) == 1
+
+
+def test_post_retried_when_server_did_nothing(make_client) -> None:
+    ok = httpx.Response(200, content=b"RIFF")
+    client, rec = make_client(httpx.ConnectError("refused"), error(429, "slow"), ok)
+    client.speech.create(voice_id=VOICE["id"], text="hi")
+    assert len(rec.requests) == 3
+    client, rec = make_client(error(502, "warming up"), error(503, "busy"), ok)
+    client.speech.create(voice_id=VOICE["id"], text="hi")
+    assert len(rec.requests) == 3
+
+
+def test_get_retried_on_read_timeout(make_client) -> None:
+    client, rec = make_client(httpx.ReadTimeout("slow"), envelope(VOICE))
+    client.voices.get(VOICE["id"])
+    assert len(rec.requests) == 2
+
+
+def test_409_not_retried(make_client) -> None:
+    client, rec = make_client(error(409, "conflict"))
+    with pytest.raises(ff.APIStatusError):
+        client.voices.get(VOICE["id"])
+    assert len(rec.requests) == 1
+
+
+def test_timeouts() -> None:
+    from flam_finesse import Finesse
+
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.extensions["timeout"])
+        return envelope(VOICE)
+
+    mine = httpx.Client(transport=httpx.MockTransport(handler), timeout=7.0)
+    Finesse(api_key="k", base_url="https://x", http_client=mine).voices.get(VOICE["id"])
+    Finesse(api_key="k", base_url="https://x", http_client=mine, timeout=3.0).voices.get(
+        VOICE["id"]
+    )
+    assert seen[0]["read"] == 7.0
+    assert seen[1]["read"] == 3.0
+    own = Finesse(api_key="k", base_url="https://x")
+    assert own._http.client.timeout.read == 120.0 and own._http.client.timeout.connect == 10.0
