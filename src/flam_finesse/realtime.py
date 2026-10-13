@@ -406,7 +406,9 @@ class RealtimeSession:
                 {"X-API-Key", "Authorization"} if token else set()
             )
             headers = {k: v for k, v in self._config.headers.items() if k not in dropped}
-            subprotocols = [SUBPROTOCOL, token] if token else [SUBPROTOCOL]
+            # Offered only with a token: a server that predates tokens selects no subprotocol,
+            # which some clients treat as a failed handshake.
+            subprotocols = [SUBPROTOCOL, token] if token else None
             try:
                 ws = await connect(
                     self.url,

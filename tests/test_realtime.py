@@ -633,11 +633,12 @@ async def test_token_rides_in_the_subprotocol_not_a_header() -> None:
     assert "X-API-Key" not in h and "Authorization" not in h
 
 
-async def test_key_session_offers_the_subprotocol_without_a_token() -> None:
+async def test_key_session_offers_no_subprotocol() -> None:
+    # Older servers select none; offering one there would fail some clients' handshakes.
     engine = Engine()
     async with running(engine) as client, client.realtime.connect() as rt:
         await collect(rt.say(voice_id=VID, text="hi"))
-    assert engine.headers[0]["Sec-WebSocket-Protocol"] == "finesse.v1"
+    assert "Sec-WebSocket-Protocol" not in engine.headers[0]
 
 
 async def test_a_spent_token_cannot_reconnect() -> None:
