@@ -7,3 +7,4 @@
 - One error hierarchy over the API's error shapes; billing-safe retries with backoff.
 - Per-call `timeout`, `max_retries` and `extra_headers` on every request method.
 - `async for voice in client.voices.list()` without awaiting the first page.
+- `client.with_raw_response`, `client.with_options()` and `FINESSE_LOG` logging.

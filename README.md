@@ -398,6 +398,32 @@ overall time to wait for the clone.
 
 ## Advanced
 
+### Raw responses
+
+`client.with_raw_response` has the same methods and returns the HTTP response with the result:
+
+```python
+raw = client.with_raw_response.speech.create(voice_id=voice.id, text="Hello!")
+print(raw.status_code, raw.headers["X-Sample-Rate"])
+audio = raw.parse()  # what speech.create returns
+```
+
+### Logging
+
+Set `FINESSE_LOG=debug` to log every request (method, URL, status, timing), or
+`FINESSE_LOG=info` to log only retries. The SDK logs to the standard `logging` module under the
+`flam_finesse` logger, so you can also configure it yourself. It never logs your API key,
+request bodies or audio.
+
+### Copying a client with other defaults
+
+`with_options` returns a copy that shares the connection pool:
+
+```python
+quick = client.with_options(timeout=10.0, max_retries=0)
+quick.voices.list()
+```
+
 ### Environments
 
 The client talks to production by default. Point it elsewhere with `base_url` or
