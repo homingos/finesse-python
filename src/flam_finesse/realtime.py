@@ -33,7 +33,7 @@ import inspect
 import json
 import uuid
 from types import TracebackType
-from typing import Any, AsyncIterator, Awaitable, Callable, Dict, Optional, Type, Union
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional, Type, Union
 
 import httpx
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -67,6 +67,8 @@ DEFAULT_OPEN_TIMEOUT = 60.0
 which takes longer when the engine is cold."""
 _CLOSE_TIMEOUT = 5.0
 _MAX_FRAME = 16 * 1024 * 1024
+_MAX_CLIENT_FRAME = 1024 * 1024
+"""The service closes the socket (1009) on a client frame over 1 MiB, ending every context."""
 
 
 class RealtimeError(FinesseError):
@@ -149,7 +151,7 @@ def _close_error(code: Optional[int], reason: str) -> Optional[RealtimeError]:
             "The service is at its connection limit. Try again shortly.",
             close_code=code,
         )
-    if code is None or code == 1006:
+    if code is None or code in (1005, 1006):  # 1005: closed without a status code
         return RealtimeError("connection_lost", "The connection dropped.", close_code=1006)
     if code in (1001, 1012, 1013):
         return RealtimeError(
@@ -254,6 +256,10 @@ class RealtimeContext:
         """Send text. Text is billed per character as it is sent. Pass ``finalize=True`` with
         the turn's last text (or call :meth:`finish`)."""
         async with self._send_lock:  # keeps task_start ahead of task_continue
+            if self.cancelled:
+                raise RealtimeError(
+                    "context_cancelled", "This context was cancelled.", context_id=self.id
+                )
             if self._finished:
                 raise RealtimeError(
                     "context_finished", "This context was already finalized.", context_id=self.id
@@ -266,14 +272,9 @@ class RealtimeContext:
                     self._started = False  # nothing was sent; the context can be retried
                     raise
             else:
-                await self._session._send(
-                    {
-                        "type": "task_continue",
-                        "context_id": self.id,
-                        "text": text,
-                        "finalize": finalize,
-                    }
-                )
+                head = {"type": "task_continue", "context_id": self.id}
+                for msg in _text_frames(head, self.id, text, finalize):
+                    await self._session._send(msg)
             if finalize:
                 self._finished = True
 
@@ -293,13 +294,19 @@ class RealtimeContext:
     async def cancel(self) -> None:
         """Stop this context now. Audio still in flight for it is dropped; iterating it ends with
         :class:`TaskCancelled`."""
-        if not self._started or self._ended or self.cancelled:
+        if self._ended or self.cancelled:
             return
-        self.cancelled = True
-        self._finished = True
-        # A send failure means the socket is gone, which ends the context anyway.
-        with contextlib.suppress(RealtimeError):
-            await self._session._send({"type": "task_cancel", "context_id": self.id})
+        self.cancelled = True  # from now on, audio for this context is dropped
+        self._finished = True  # and no more text is accepted
+        # Waits for a send in flight, so a start that is being sent is cancelled after it.
+        async with self._send_lock:
+            if not self._started:
+                # Nothing reached the service: end the context here.
+                self._put(TaskCancelled(type="task_cancelled", context_id=self.id))
+                return
+            # A send failure means the socket is gone, which ends the context anyway.
+            with contextlib.suppress(RealtimeError):
+                await self._session._send({"type": "task_cancel", "context_id": self.id})
 
     async def __aiter__(self) -> AsyncIterator[RealtimeEvent]:
         while True:
@@ -486,8 +493,10 @@ class RealtimeSession:
             voice_id: One of your voices or a public platform voice.
             output_format: ``s16le`` (default), ``s24le``, ``s32le``, ``f32le``, ``f64le`` or
                 ``opus``.
-            sample_rate: Output rate in Hz; the native rate is 24000 and lower values still
-                produce 24000 (see ``TaskStarted.sample_rate``).
+            sample_rate: Output rate in Hz, 8000-48000; the native rate is 24000 and lower
+                values still produce 24000 (see ``TaskStarted.sample_rate``).
+            num_step: Generation steps, 1-32 (default and maximum 32; higher values are
+                capped). Fewer is faster, more is higher quality.
             length_scale: Speaking rate.
             idle_flush_ms: Speak a pending sentence after this many ms without new text.
         """
@@ -561,18 +570,19 @@ class RealtimeSession:
                 "A running context already uses this id.",
                 context_id=ctx.id,
             )
-        msg: Dict[str, Any] = {"type": "task_start", "context_id": ctx.id, **ctx._options}
-        msg["text"] = text
-        msg["finalize"] = finalize
+        head: Dict[str, Any] = {"type": "task_start", "context_id": ctx.id, **ctx._options}
+        first, *rest = _text_frames(head, ctx.id, text, finalize)
         # Register before sending so no reply can arrive for an unknown context. If the send
         # fails the frame never left, so forget the context. A cancellation mid-send keeps it,
         # because the server may already be working on it.
         self._contexts[ctx.id] = ctx
         try:
-            await self._send(msg)
+            await self._send(first)
         except FinesseError:
             self._contexts.pop(ctx.id, None)
             raise
+        for msg in rest:
+            await self._send(msg)
 
     async def _send(self, msg: Dict[str, Any]) -> None:
         ws = self._ws
@@ -693,6 +703,37 @@ class RealtimeSession:
             # Odd field types: keep the event (and so the end of the turn) without them.
             event = RealtimeEvent(type=str(kind), context_id=ctx.id)
         ctx._put(event)
+
+
+def _text_frames(
+    head: Dict[str, Any], context_id: str, text: str, finalize: bool
+) -> List[Dict[str, Any]]:
+    """The frames that send ``text``: ``head`` with the text, or, when that would be over the
+    service's 1 MiB frame limit, ``head`` with the first piece and ``task_continue`` frames
+    with the rest. Only the last frame carries ``finalize``. Text splits between characters."""
+    msg = {**head, "text": text, "finalize": finalize}
+    if len(json.dumps(msg).encode()) <= _MAX_CLIENT_FRAME:
+        return [msg]
+    cont: Dict[str, Any] = {"type": "task_continue", "context_id": context_id}
+
+    def budget(frame: Dict[str, Any]) -> int:
+        return _MAX_CLIENT_FRAME - len(json.dumps({**frame, "text": "", "finalize": False}))
+
+    pieces: List[str] = []
+    start, size, room = 0, 0, budget(head)
+    for i, ch in enumerate(text):
+        # Bytes the character takes inside a JSON string (escapes included).
+        cost = 1 if " " <= ch <= "~" and ch not in '"\\' else len(json.dumps(ch)) - 2
+        if size + cost > room and i > start:
+            pieces.append(text[start:i])
+            start, size, room = i, 0, budget(cont)
+        size += cost
+    pieces.append(text[start:])
+    frames = [
+        {**(head if i == 0 else cont), "text": p, "finalize": False} for i, p in enumerate(pieces)
+    ]
+    frames[-1]["finalize"] = finalize
+    return frames
 
 
 class AsyncRealtime:

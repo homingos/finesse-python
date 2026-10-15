@@ -41,6 +41,13 @@ def test_voice_model() -> None:
     assert v.created_at == datetime(2025, 10, 9, 8, 53, 20, tzinfo=timezone.utc)
     assert v.is_ready
     assert v.model_extra == {"brand_new_field": 1}
+    assert v.created_via_key_prefix is None
+    assert (
+        ff.Voice.model_validate(
+            {**VOICE, "created_via_key_prefix": "flv_ab12"}
+        ).created_via_key_prefix
+        == "flv_ab12"
+    )
 
 
 def test_list_walks_pages(make_client) -> None:

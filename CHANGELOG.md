@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.1.1 (unreleased)
+
+- Token-authenticated speech (`access_token`) is retried only on 429. The token is spent just
+  before synthesis runs, so a retry after a 5xx or a dropped connection failed with
+  `token_invalid` and hid the real error; those are now raised as is.
+- Realtime: `cancel()` on a context that never started ends it, so iterating it no longer hangs,
+  and waits for a `send` in flight, so a start being sent is cancelled after it. `send` after
+  `cancel` raises `RealtimeError(code="context_cancelled")`.
+- Realtime: text that would make a frame over the service's 1 MiB limit is split across several
+  frames instead of closing the socket (1009) and failing every context.
+- Realtime: a close without a status code (1005) is a retryable `connection_lost`.
+- Errors: running out of credits during synthesis has `code == "insufficient_credits"` (it was
+  `payment_required`). `code` documents the rest of the API's codes: `payment_required`,
+  `forbidden`, `conflict`, `internal_error`, `unavailable`, `idempotency_in_progress`,
+  `idempotency_key_reused`.
+- Types: `Voice.metadata`, `Voice.deleted_at` and `CloneJob.result` are removed (the API no
+  longer returns them); `Voice.created_via_key_prefix` is added.
+- Docs: `num_step` is 1-32, `sample_rate` 8000-48000; clone clips need at least 10 s and
+  `ref_text` at most 4,000 characters; media URLs may be short-lived signed URLs.
+
 ## 0.1.0 (unreleased)
 
 - Sync and async clients: voices, cloning with job waiting, one-shot and streamed speech.

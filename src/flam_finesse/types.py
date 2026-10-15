@@ -68,17 +68,19 @@ class Voice(_Model):
     gender: Optional[str] = None
     labels: Dict[str, str] = {}
     settings: Optional[VoiceSettings] = None
-    metadata: Optional[Dict[str, Any]] = None
     external_ref: Optional[str] = None
     original_audio_url: Optional[str] = None
+    """The reference clip (your own voices only). Media URLs may be short-lived signed URLs:
+    download promptly, or fetch the voice again for a fresh one."""
     sample_audio_url: Optional[str] = None
     avatar_url: Optional[str] = None
     base_voice_id: Optional[str] = None
+    created_via_key_prefix: Optional[str] = None
+    """Prefix of the API key that created the voice, when one did (your own voices only)."""
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     last_used_at: Optional[datetime] = None
     expires_at: Optional[datetime] = None
-    deleted_at: Optional[datetime] = None
 
     @property
     def is_ready(self) -> bool:
@@ -97,9 +99,7 @@ class Voice(_Model):
             }
         return value
 
-    @field_validator(
-        "created_at", "updated_at", "last_used_at", "expires_at", "deleted_at", mode="before"
-    )
+    @field_validator("created_at", "updated_at", "last_used_at", "expires_at", mode="before")
     @classmethod
     def _times(cls, value: Any) -> Any:
         return _millis(value)
@@ -119,7 +119,6 @@ class CloneJob(_Model):
     attempts: int = 0
     error: Optional[Dict[str, Any]] = None
     """Failure detail, ``{"message": ..., "status_code": ...}``."""
-    result: Optional[Dict[str, Any]] = None
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
     created_at: Optional[datetime] = None
@@ -151,6 +150,8 @@ class Audio(_Model):
     generation_id: Optional[str] = None
     """Id of the generation history record (when object storage is enabled)."""
     audio_url: Optional[str] = None
+    """Stored copy of the clip, when storage is enabled. May be a short-lived signed URL:
+    download it promptly."""
     billing_remaining: Optional[int] = None
 
     def save(self, path: Any) -> None:
@@ -187,6 +188,7 @@ class StreamDone(_Model):
     audio_duration_s: Optional[float] = None
     generation_id: Optional[str] = None
     audio_url: Optional[str] = None
+    """Stored copy of the clip, when storage is enabled. May be a short-lived signed URL."""
 
 
 class AccessToken(_Model):
