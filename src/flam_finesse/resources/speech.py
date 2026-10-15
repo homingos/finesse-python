@@ -270,9 +270,10 @@ class Speech:
             voice_id: One of your voices or a public platform voice; it must be ready.
             output_format: ``wav`` (default) or raw PCM: ``s16le``, ``s24le``, ``s32le``,
                 ``f32le``, ``f64le``.
-            sample_rate: Output rate in Hz. The native rate is 24000; lower values still
-                return 24000 (check ``Audio.sample_rate``).
-            num_step: Generation steps (default 32); fewer is faster, more is higher quality.
+            sample_rate: Output rate in Hz, 8000-48000. The native rate is 24000; lower
+                values still return 24000 (check ``Audio.sample_rate``).
+            num_step: Generation steps, 1-32 (default and maximum 32; more is a 400). Fewer
+                is faster, more is higher quality.
         """
         body = _speech_body(text, language, output_format, sample_rate, num_step)
         response = self._http.with_options(timeout, max_retries, extra_headers).request(

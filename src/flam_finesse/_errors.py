@@ -72,10 +72,12 @@ class APIStatusError(FinesseError):
         message: Human-readable reason.
         code: Machine-readable code. Branch on this, never on ``message``. Envelope codes:
             ``invalid_request``, ``unauthorized``, ``key_expired``, ``token_invalid``,
-            ``insufficient_scope``, ``voice_not_allowed``, ``not_found``,
-            ``payload_too_large``, ``invalid_input``, ``rate_limited``,
-            ``concurrency_limited``, ``upstream_error``, ``upstream_busy``, ...; plan
-            denials: ``insufficient_credits``, ``quota_exhausted``, ``feature_disabled``,
+            ``payment_required``, ``forbidden``, ``insufficient_scope``,
+            ``voice_not_allowed``, ``not_found``, ``conflict``, ``idempotency_in_progress``,
+            ``idempotency_key_reused``, ``payload_too_large``, ``invalid_input``,
+            ``rate_limited``, ``concurrency_limited``, ``internal_error``,
+            ``upstream_error``, ``upstream_busy``, ``unavailable``; plan denials:
+            ``insufficient_credits``, ``quota_exhausted``, ``feature_disabled``,
             ``plan_limit_reached``; realtime: ``too_many_sessions``. ``None`` when absent.
         body: The decoded JSON body, or the raw text when it is not JSON.
         billing_remaining: ``X-Billing-Remaining`` header as an int, when sent.
@@ -132,13 +134,14 @@ class AuthenticationError(APIStatusError):
 
 
 class PaymentRequiredError(APIStatusError):
-    """402: out of credits (``insufficient_credits``) or quota (``quota_exhausted``)."""
+    """402: out of credits (``insufficient_credits``) or quota (``quota_exhausted``), or
+    another payment problem (``payment_required``)."""
 
 
 class PermissionDeniedError(APIStatusError):
     """403: the key lacks the route's scope (``insufficient_scope``), a token is limited to
     other voices (``voice_not_allowed``), the plan lacks the feature (``feature_disabled``), or
-    a cap is reached (``plan_limit_reached``, see ``feature``)."""
+    a cap is reached (``plan_limit_reached``, see ``feature``); otherwise ``forbidden``."""
 
     @property
     def feature(self) -> Optional[str]:
@@ -153,7 +156,8 @@ class NotFoundError(APIStatusError):
 
 
 class ConflictError(APIStatusError):
-    """409: e.g. a request with the same ``Idempotency-Key`` is still running."""
+    """409: a conflict (``conflict``), e.g. a request with the same ``Idempotency-Key`` is
+    still running (``idempotency_in_progress``)."""
 
 
 class PayloadTooLargeError(APIStatusError):
@@ -171,8 +175,9 @@ class RateLimitError(APIStatusError):
 
 
 class InternalServerError(APIStatusError):
-    """5xx: a server error, the synthesis service failing (``upstream_error``, 502) or at
-    capacity (``upstream_busy``, 503, with ``retry_after``). Usually safe to retry."""
+    """5xx: a server error (``internal_error``), the synthesis service failing
+    (``upstream_error``, 502) or at capacity (``upstream_busy``, 503, with ``retry_after``),
+    or the service unavailable (``unavailable``). Usually safe to retry."""
 
 
 class StreamError(FinesseError):
@@ -252,6 +257,10 @@ def make_status_error(response: httpx.Response) -> APIStatusError:
 
     if not message:
         message = response.reason_phrase or f"HTTP {response.status_code}"
+    # The credit check inside synthesis sends the generic code for 402 with the specific one
+    # as the message: {"message": "insufficient_credits", "code": "payment_required"}.
+    if response.status_code == 402 and message == "insufficient_credits":
+        code = message
 
     status = response.status_code
     cls = _STATUS_ERRORS.get(status)

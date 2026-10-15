@@ -164,14 +164,14 @@ audio = client.speech.create(
     text="The quick brown fox jumps over the lazy dog.",
     language="en",  # optional; defaults to the voice's language
     output_format="wav",  # default; or raw PCM: "s16le", "s24le", "s32le", "f32le", "f64le"
-    num_step=32,  # optional; fewer steps is faster, more is higher quality
+    num_step=32,  # optional, 1-32; fewer steps is faster, more is higher quality
 )
 
 audio.data  # bytes
 audio.content_type  # "audio/wav"
 audio.sample_rate  # 24000
 audio.generation_id  # id of this clip in your generation history
-audio.audio_url  # stored copy of the clip, when storage is enabled
+audio.audio_url  # stored copy of the clip, when storage is enabled (may expire: download promptly)
 audio.save("fox.wav")
 ```
 
@@ -275,6 +275,7 @@ A turn that fails raises `RealtimeError` (for example `code == "voice_not_found"
 - If the connection drops, running contexts raise `RealtimeError`. Check `error.retryable`. The
   next context reconnects automatically (turn this off with `connect(auto_reconnect=False)`).
 - Running out of credits ends the session with `RealtimeError(code="insufficient_credits")`.
+- The service accepts frames of up to 1 MiB. The SDK splits longer text across several frames.
 - Text is billed per character as it is sent. A session reserves credits in blocks of up to
   1,000 characters and returns what it doesn't use when it ends.
 
@@ -304,7 +305,8 @@ async with client.realtime.connect(get_access_token=fetch_token_from_my_backend)
 ```
 
 A request refused before it runs (a `429` rate limit, a plan check) keeps its token, so you can
-retry it. A spent, expired or unknown token raises `AuthenticationError` with
+retry it. The SDK retries a token-authenticated request only on `429`: a `5xx` comes after the
+token was spent, so it is raised as is. A spent, expired or unknown token raises `AuthenticationError` with
 `code == "token_invalid"`; a voice outside `voice_ids` raises `PermissionDeniedError` with
 `code == "voice_not_allowed"`.
 
@@ -348,8 +350,8 @@ asyncio.run(main())
 | `f32le`, `f64le` | Raw PCM, 32- or 64-bit float | |
 | `opus` | Opus | realtime only |
 
-All audio is mono. The engine's native rate is 24 kHz. You can ask for a higher `sample_rate`,
-but lower ones still come back at 24 kHz, so always read the actual rate from
+All audio is mono. The engine's native rate is 24 kHz. `sample_rate` accepts 8000 to 48000 Hz,
+but rates below 24 kHz still come back at 24 kHz, so always read the actual rate from
 `audio.sample_rate`, `stream.sample_rate` or `TaskStarted.sample_rate`.
 
 ## Handling errors
@@ -377,14 +379,14 @@ except ff.APIConnectionError:
 |---|---|---|
 | `BadRequestError` | 400 | Invalid input, text over 10,000 characters, voice not enrolled |
 | `AuthenticationError` | 401 | Missing, unknown or revoked key; `key_expired`; `token_invalid` |
-| `PaymentRequiredError` | 402 | `insufficient_credits` or `quota_exhausted` |
-| `PermissionDeniedError` | 403 | `insufficient_scope` (the key lacks the route's scope), `voice_not_allowed` (token), `feature_disabled`, or `plan_limit_reached` (see `.feature`) |
+| `PaymentRequiredError` | 402 | `insufficient_credits`, `quota_exhausted` or `payment_required` |
+| `PermissionDeniedError` | 403 | `insufficient_scope` (the key lacks the route's scope), `voice_not_allowed` (token), `feature_disabled`, `plan_limit_reached` (see `.feature`), or `forbidden` |
 | `NotFoundError` | 404 | No such voice or job, or not visible to your workspace |
-| `ConflictError` | 409 | A request with the same `Idempotency-Key` is still running |
+| `ConflictError` | 409 | `idempotency_in_progress` (a request with the same `Idempotency-Key` is still running) or `conflict` |
 | `PayloadTooLargeError` | 413 | Request body over 21 MiB |
 | `UnprocessableEntityError` | 422 | `invalid_input` (the engine could not use the text), or `idempotency_key_reused` |
 | `RateLimitError` | 429 | `rate_limited` / `concurrency_limited` (your plan's limits; see `retry_after`), or `too_many_sessions` |
-| `InternalServerError` | 5xx | `upstream_error` (502) or `upstream_busy` (503, see `retry_after`): retry |
+| `InternalServerError` | 5xx | `internal_error`, `upstream_error` (502), `upstream_busy` (503, see `retry_after`) or `unavailable`: retry |
 | `APIConnectionError` | | No response; `APITimeoutError` when it timed out |
 | `StreamError` | | A speech stream failed after it started |
 | `RealtimeError` | | A realtime context or session failed |

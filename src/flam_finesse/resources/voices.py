@@ -164,8 +164,9 @@ class Voices:
         max_retries: Optional[int] = None,
         extra_headers: Optional[Mapping[str, str]] = None,
     ) -> CloneResult:
-        """Create a voice from a reference clip (at most 20 MiB; 10-30 s of clear speech works
-        best). Returns at once with the voice in ``processing`` and a ``job_id``; use
+        """Create a voice from a reference clip (at most 20 MiB; at least 10 s, and 10-30 s of
+        clear speech works best). ``ref_text``, the clip's transcript, is at most 4,000
+        characters. Returns at once with the voice in ``processing`` and a ``job_id``; use
         :meth:`wait_until_ready` to block until the voice can speak, or :meth:`clone_and_wait`
         to do both.
 

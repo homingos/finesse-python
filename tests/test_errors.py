@@ -120,3 +120,27 @@ def test_openai_shape_with_odd_types(make_client) -> None:
     with pytest.raises(ff.BadRequestError) as info:
         client.voices.get(VOICE["id"])
     assert isinstance(info.value.message, str)
+
+
+def test_credit_check_in_synthesis_keeps_its_specific_code(make_client) -> None:
+    # The credit check inside synthesis sends the generic 402 code next to the specific one.
+    body = {
+        "status": 402,
+        "error": True,
+        "message": "insufficient_credits",
+        "code": "payment_required",
+    }
+    client, _ = make_client(httpx.Response(402, json=body))
+    with pytest.raises(ff.PaymentRequiredError) as info:
+        client.speech.create(voice_id=VOICE["id"], text="hi")
+    assert info.value.code == "insufficient_credits"
+    other = {
+        "status": 402,
+        "error": True,
+        "message": "Payment required",
+        "code": "payment_required",
+    }
+    client, _ = make_client(httpx.Response(402, json=other))
+    with pytest.raises(ff.PaymentRequiredError) as info:
+        client.speech.create(voice_id=VOICE["id"], text="hi")
+    assert info.value.code == "payment_required"
