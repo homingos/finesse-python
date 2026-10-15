@@ -33,6 +33,10 @@ _RETRY_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
 # the server may have finished (and billed) it.
 _POST_RETRY_STATUSES = frozenset({429, 502, 503})
 _UNSENT_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
+# A short-lived token is spent just before the handler runs, after every check that can refuse
+# the request. Only a 429 comes before the spend; a retry after a 5xx or a dropped connection
+# would fail with 401 token_invalid and hide the real error.
+_TOKEN_POLICY = "TOKEN"
 _MAX_BACKOFF = 8.0
 
 TimeoutTypes = Union[float, httpx.Timeout, None]
@@ -135,11 +139,14 @@ def _retry_policy(
 ) -> str:
     """The method whose retry rules apply. A keyed POST is retried like a read, but only once
     the server has shown it honours keys by echoing one back; until then (an older server)
-    it keeps the cautious POST rules, so nothing can run twice."""
+    it keeps the cautious POST rules, so nothing can run twice. A request authenticated by a
+    short-lived token follows the token rules whatever its method."""
+    if key is not None and response is not None and response.headers.get("Idempotency-Key") == key:
+        config.server.honours_idempotency_keys = True
+    if config.access_token:
+        return _TOKEN_POLICY
     if key is None:
         return method
-    if response is not None and response.headers.get("Idempotency-Key") == key:
-        config.server.honours_idempotency_keys = True
     return "GET" if config.server.honours_idempotency_keys else method
 
 
@@ -163,10 +170,12 @@ def _wait_budget(config: _Config) -> float:
 
 
 def _should_retry_error(method: str, exc: Exception) -> bool:
-    return method != "POST" or isinstance(exc, _UNSENT_ERRORS)
+    return method not in ("POST", _TOKEN_POLICY) or isinstance(exc, _UNSENT_ERRORS)
 
 
 def _should_retry_status(method: str, status: int) -> bool:
+    if method == _TOKEN_POLICY:
+        return status == 429
     return status in (_POST_RETRY_STATUSES if method == "POST" else _RETRY_STATUSES)
 
 

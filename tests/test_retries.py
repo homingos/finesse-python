@@ -6,7 +6,7 @@ import pytest
 import flam_finesse as ff
 from flam_finesse._base import _retry_delay
 
-from .conftest import VOICE, envelope, error
+from .conftest import BASE, VOICE, Recorder, envelope, error
 
 
 def test_retries_then_succeeds(make_client) -> None:
@@ -250,3 +250,58 @@ def test_echo_unlocks_retries_for_the_whole_client(make_client) -> None:
     client.voices.create(name="a")  # the server echoes: keys are honoured
     client.with_options(timeout=5.0).voices.create(name="b")  # copies share what was learned
     assert len(rec.requests) == 3
+
+
+# -- short-lived tokens --------------------------------------------------------------------
+
+
+def token_client(*responses: object, cls: type = ff.Finesse) -> tuple:
+    rec = Recorder(*responses)
+    transport = httpx.MockTransport(rec)
+    http = (
+        httpx.Client(transport=transport)
+        if cls is ff.Finesse
+        else httpx.AsyncClient(transport=transport)
+    )
+    return cls(access_token="fin_tok_abc", base_url=BASE, http_client=http), rec
+
+
+@pytest.mark.parametrize("status", [500, 502, 503, 504])
+def test_token_request_not_retried_after_the_spend(status: int) -> None:
+    # The token was spent before the handler failed: a retry would only get token_invalid.
+    client, rec = token_client(echo(error(status, "engine down")), httpx.Response(200))
+    with pytest.raises(ff.InternalServerError) as info:
+        client.speech.create(voice_id=VOICE["id"], text="hi")
+    assert info.value.status_code == status
+    assert len(rec.requests) == 1
+    client, rec = token_client(error(status, "engine down"), httpx.Response(200))
+    with pytest.raises(ff.InternalServerError):
+        client.speech.stream(voice_id=VOICE["id"], text="hi").read_all()
+    assert len(rec.requests) == 1
+
+
+def test_token_request_not_retried_after_a_send_failure() -> None:
+    client, rec = token_client(httpx.ReadTimeout("slow"), httpx.Response(200))
+    with pytest.raises(ff.APITimeoutError):
+        client.speech.create(voice_id=VOICE["id"], text="hi")
+    assert len(rec.requests) == 1
+
+
+def test_token_request_retried_on_429_and_unsent_errors() -> None:
+    # A 429 is refused before the spend, and a connection that never opened sent nothing.
+    ok = httpx.Response(200, content=b"RIFF")
+    client, rec = token_client(error(429, "slow down"), httpx.ConnectError("refused"), ok)
+    assert client.speech.create(voice_id=VOICE["id"], text="hi").data == b"RIFF"
+    assert len(rec.requests) == 3
+
+
+async def test_async_token_request_not_retried_after_the_spend() -> None:
+    client, rec = token_client(error(502, "engine down"), httpx.Response(200), cls=ff.AsyncFinesse)
+    with pytest.raises(ff.InternalServerError):
+        await client.speech.create(voice_id=VOICE["id"], text="hi")
+    assert len(rec.requests) == 1
+    client, rec = token_client(
+        error(429, "slow down"), httpx.Response(200, content=b"A"), cls=ff.AsyncFinesse
+    )
+    await client.speech.create(voice_id=VOICE["id"], text="hi")
+    assert len(rec.requests) == 2
