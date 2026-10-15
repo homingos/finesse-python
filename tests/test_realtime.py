@@ -722,3 +722,80 @@ async def test_static_token_first_then_the_callback_on_reconnect() -> None:
         "finesse.v1, fin_tok_first",
         "finesse.v1, fin_tok_fresh",
     ]
+
+
+def test_close_without_status_is_a_retryable_drop() -> None:
+    from flam_finesse.realtime import _close_error
+
+    err = _close_error(1005, "")
+    assert err is not None
+    assert (err.code, err.close_code, err.retryable) == ("connection_lost", 1006, True)
+
+
+async def test_cancel_before_start_ends_the_context() -> None:
+    engine = Engine()
+    async with running(engine) as client, client.realtime.connect() as rt:
+        ctx = rt.context(voice_id=VID)
+        await ctx.cancel()
+        events = await asyncio.wait_for(collect(ctx), 1)
+        assert [e.type for e in events] == ["task_cancelled"]
+        assert isinstance(events[0], ff.TaskCancelled) and events[0].context_id == ctx.id
+        with pytest.raises(ff.RealtimeError) as info:
+            await ctx.send("too late")
+        assert info.value.code == "context_cancelled"
+        await ctx.cancel()  # idempotent
+    assert engine.received == [{"type": "session_end"}]
+
+
+async def test_cancel_during_start_cancels_after_it() -> None:
+    engine = Engine()
+
+    async def slow_handshake(conn: ServerConnection, request: Request) -> None:
+        await asyncio.sleep(0.1)
+
+    async with running(engine, process_request=slow_handshake) as client:
+        rt = client.realtime.connect()  # opens on the first send
+        ctx = rt.context(voice_id=VID)
+        sending = asyncio.ensure_future(ctx.send("hello"))
+        await asyncio.sleep(0.02)  # the start is in flight, waiting for the socket
+        await ctx.cancel()
+        await sending
+        events = await asyncio.wait_for(collect(ctx), 1)
+        await rt.close()
+    assert events[-1].type == "task_cancelled"
+    kinds = [m["type"] for m in engine.received if m.get("context_id") == ctx.id]
+    assert kinds == ["task_start", "task_cancel"]
+
+
+async def test_long_text_is_split_under_the_frame_limit() -> None:
+    from flam_finesse.realtime import _MAX_CLIENT_FRAME
+
+    engine = Engine()
+    # The fake service keeps websockets' default 1 MiB read limit, like the real one: a frame
+    # over it would close the socket with 1009.
+    text = ("Hello, world. " * 50_000) + ("é" * 200_000) + ("\U0001f600" * 50_000) + '"\\\n end'
+    async with running(engine) as client, client.realtime.connect() as rt:
+        ctx = rt.context(voice_id=VID)
+        await ctx.send(text[:10])
+        await ctx.send(text[10:], finalize=True)
+        events = await asyncio.wait_for(collect(ctx), 10)
+    assert events[-1].type == "task_done"
+    frames = [m for m in engine.received if m.get("context_id") == ctx.id]
+    assert len(frames) > 3
+    assert all(len(json.dumps(m).encode()) <= _MAX_CLIENT_FRAME for m in frames)
+    assert [m["type"] for m in frames] == ["task_start"] + ["task_continue"] * (len(frames) - 1)
+    assert [m["finalize"] for m in frames] == [False] * (len(frames) - 1) + [True]
+    assert "".join(m["text"] for m in frames) == text
+
+
+async def test_long_first_text_starts_with_its_first_piece() -> None:
+    engine = Engine()
+    text = "x" * (3 * 1024 * 1024)
+    async with running(engine) as client, client.realtime.connect() as rt:
+        events = await asyncio.wait_for(collect(rt.say(voice_id=VID, text=text)), 10)
+    assert events[-1].type == "task_done"
+    frames = [m for m in engine.received if m.get("context_id")]
+    assert frames[0]["type"] == "task_start" and frames[0]["voice_id"] == VID
+    assert all(m["type"] == "task_continue" and "voice_id" not in m for m in frames[1:])
+    assert [m["finalize"] for m in frames] == [False] * (len(frames) - 1) + [True]
+    assert "".join(m["text"] for m in frames) == text
