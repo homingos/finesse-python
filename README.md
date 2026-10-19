@@ -488,21 +488,11 @@ quick = client.with_options(timeout=10.0, max_retries=0)
 quick.voices.list()
 ```
 
-### Environments
-
-The client talks to production by default. Point it elsewhere with `base_url` or
-`FINESSE_BASE_URL`:
-
-```python
-client = Finesse(base_url="https://finesse.example.test")
-```
-
 ### Configuration
 
 | Argument | Environment variable | Default |
 |---|---|---|
 | `api_key` | `FINESSE_API_KEY` | required |
-| `base_url` | `FINESSE_BASE_URL` | `https://fi.production.flamapis.com` |
 | `timeout` | | 120 s (10 s to connect) |
 | `max_retries` | | 2 |
 | `default_headers` | | none |
@@ -570,5 +560,5 @@ and refuse to run against production:
 
 ```sh
 FINESSE_LIVE=1 FINESSE_API_KEY=flv_... \
-FINESSE_BASE_URL=https://finesse.example.test uv run pytest tests/live -v
+FINESSE_BASE_URL=<non-production API URL> uv run pytest tests/live -v
 ```
