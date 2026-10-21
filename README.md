@@ -163,7 +163,7 @@ audio = client.speech.create(
     voice_id=voice.id,
     text="The quick brown fox jumps over the lazy dog.",
     language="en",  # optional; defaults to the voice's language
-    output_format="wav",  # default; or raw PCM: "s16le", "s24le", "s32le", "f32le", "f64le"
+    output_format="wav",  # default; or raw PCM: "s16le", "s24le", "s32le", "f32le", "f64le", or "mulaw"
     num_step=32,  # optional, 1-32; fewer steps is faster, more is higher quality
 )
 
@@ -348,11 +348,28 @@ asyncio.run(main())
 | `s16le` | Raw PCM, 16-bit signed little-endian | `speech.stream`, realtime |
 | `s24le`, `s32le` | Raw PCM, 24- or 32-bit signed | |
 | `f32le`, `f64le` | Raw PCM, 32- or 64-bit float | |
+| `mulaw` | Raw G.711 µ-law, for telephony | needs `sample_rate=8000` |
 | `opus` | Opus | realtime only |
 
-All audio is mono. The engine's native rate is 24 kHz. `sample_rate` accepts 8000 to 48000 Hz,
-but rates below 24 kHz still come back at 24 kHz, so always read the actual rate from
-`audio.sample_rate`, `stream.sample_rate` or `TaskStarted.sample_rate`.
+All audio is mono. The engine's native rate is 24 kHz. `sample_rate` accepts 8000 to 48000 Hz;
+8000 (telephony) is produced as asked, but other rates below 24 kHz still come back at 24 kHz,
+so always read the actual rate from `audio.sample_rate`, `stream.sample_rate` or
+`TaskStarted.sample_rate`.
+
+### Phone calls (Twilio)
+
+Twilio Media Streams play 8 kHz µ-law. Ask for exactly that and send each chunk as the media
+payload, base64-encoded; there is no WAV header to strip and nothing to resample:
+
+```python
+import base64, json
+
+ctx = rt.context(voice_id=VOICE_ID, output_format="mulaw", sample_rate=8000)
+
+async for audio in ctx.audio():
+    media = {"payload": base64.b64encode(audio).decode()}
+    await twilio_ws.send(json.dumps({"event": "media", "streamSid": stream_sid, "media": media}))
+```
 
 ## Handling errors
 

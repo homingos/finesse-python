@@ -268,10 +268,12 @@ class Speech:
 
         Args:
             voice_id: One of your voices or a public platform voice; it must be ready.
-            output_format: ``wav`` (default) or raw PCM: ``s16le``, ``s24le``, ``s32le``,
-                ``f32le``, ``f64le``.
-            sample_rate: Output rate in Hz, 8000-48000. The native rate is 24000; lower
-                values still return 24000 (check ``Audio.sample_rate``).
+            output_format: ``wav`` (default), raw PCM (``s16le``, ``s24le``, ``s32le``,
+                ``f32le``, ``f64le``) or raw G.711 ``mulaw`` for telephony, which needs
+                ``sample_rate=8000``.
+            sample_rate: Output rate in Hz, 8000-48000. The native rate is 24000; 8000 is
+                produced as asked, other lower values still return 24000 (check
+                ``Audio.sample_rate``).
             num_step: Generation steps, 1-32 (default and maximum 32; more is a 400). Fewer
                 is faster, more is higher quality.
         """
