@@ -2,6 +2,8 @@
 
 ## 0.1.1 (unreleased)
 
+- `output_format="mulaw"` (raw G.711 µ-law) for telephony, with `sample_rate=8000`, on speech
+  and realtime contexts. 8 kHz is now produced as asked; the README shows Twilio Media Streams.
 - Token-authenticated speech (`access_token`) is retried only on 429. The token is spent just
   before synthesis runs, so a retry after a 5xx or a dropped connection failed with
   `token_invalid` and hid the real error; those are now raised as is.

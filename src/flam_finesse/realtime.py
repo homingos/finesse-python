@@ -491,10 +491,11 @@ class RealtimeSession:
 
         Args:
             voice_id: One of your voices or a public platform voice.
-            output_format: ``s16le`` (default), ``s24le``, ``s32le``, ``f32le``, ``f64le`` or
-                ``opus``.
-            sample_rate: Output rate in Hz, 8000-48000; the native rate is 24000 and lower
-                values still produce 24000 (see ``TaskStarted.sample_rate``).
+            output_format: ``s16le`` (default), ``s24le``, ``s32le``, ``f32le``, ``f64le``,
+                ``opus``, or ``mulaw`` (G.711 for telephony, with ``sample_rate=8000``).
+            sample_rate: Output rate in Hz, 8000-48000; the native rate is 24000. 8000 is
+                produced as asked, other lower values still produce 24000 (see
+                ``TaskStarted.sample_rate``).
             num_step: Generation steps, 1-32 (default and maximum 32; higher values are
                 capped). Fewer is faster, more is higher quality.
             length_scale: Speaking rate.
