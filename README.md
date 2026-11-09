@@ -311,8 +311,10 @@ return session.model_dump(mode="json")
 # On the device
 from flam_finesse import DirectSession, connect_direct
 
+
 async def fetch_session() -> DirectSession:
     return DirectSession.model_validate(await my_backend.post("/finesse-session"))
+
 
 async with connect_direct(get_session=fetch_session) as rt:
     ...
