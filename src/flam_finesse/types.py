@@ -9,7 +9,7 @@ plain ``dict``.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
@@ -189,6 +189,37 @@ class StreamDone(_Model):
     generation_id: Optional[str] = None
     audio_url: Optional[str] = None
     """Stored copy of the clip, when storage is enabled. May be a short-lived signed URL."""
+
+
+class DirectSession(_Model):
+    """A direct realtime session from ``realtime.sessions.create``: a socket straight to the
+    synthesis GPU in your account's server region. Pass it to ``realtime.connect(session=...)``.
+    """
+
+    session_id: str
+    url: str
+    """The GPU's WebSocket URL. Connect to it as returned."""
+    protocol: str = "finesse.v1"
+    """The subprotocol to offer first."""
+    token: str
+    """Single-use ``ft1.`` token, offered as the second subprotocol."""
+    connect_by: Optional[datetime] = None
+    """The socket must open before this (60 s after creation)."""
+    ttl_seconds: Optional[int] = None
+    """The longest the session can run once connected."""
+    budget_chars: Optional[int] = None
+    """Characters reserved for the session; it cannot synthesize more."""
+    region: Optional[str] = None
+    """GPU region the session runs in: ``ap-south`` or ``us-east``."""
+    voices: List[str] = []
+    """The only voices the session can use."""
+
+    def __repr__(self) -> str:
+        # Never print the secret itself.
+        return (
+            f"DirectSession(session_id={self.session_id!r}, region={self.region!r}, "
+            f"budget_chars={self.budget_chars!r}, connect_by={self.connect_by!r})"
+        )
 
 
 class AccessToken(_Model):

@@ -2,6 +2,15 @@
 
 ## 0.1.1 (unreleased)
 
+- Direct realtime sessions: `realtime.sessions.create(voice_ids=..., budget_chars=...)` (sync and
+  async) and `realtime.connect(session=...)` / `get_session=...` run the socket straight against
+  the synthesis GPU in the account's server region, for lower latency. `connect_direct` opens one
+  without a client or API key. `RealtimeSession.direct_session` reports its region and budget.
+- Realtime: on a direct session, close code `4401` is `RealtimeError(code="unauthorized")` (the
+  token was invalid, already used or past `connect_by`), not `service_auth_failed`. Reusing a
+  spent session raises `session_spent`; one past `connect_by` raises `session_expired` without
+  dialing.
+
 - `output_format="mulaw"` (raw G.711 µ-law) for telephony, with `sample_rate=8000`, on speech
   and realtime contexts. 8 kHz is now produced as asked; the README shows Twilio Media Streams.
 - Token-authenticated speech (`access_token`) is retried only on 429. The token is spent just

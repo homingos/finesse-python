@@ -14,6 +14,15 @@ key (``client.tokens.create``); a client holding only tokens connects with
 ``client.realtime.connect(get_access_token=...)``, which fetches a fresh one for every
 (re)connect.
 
+For the lowest latency, run a *direct session*: the socket goes straight to the synthesis GPU in
+your account's server region instead of through the API. Messages and events are the same::
+
+    sessions = client.realtime.sessions
+    async with client.realtime.connect(
+        get_session=lambda: sessions.create(voice_ids=[vid])
+    ) as rt:
+        ...
+
 Stream text as an LLM produces it, and cancel on barge-in::
 
     ctx = rt.context(voice_id=vid)
@@ -32,6 +41,7 @@ import contextlib
 import inspect
 import json
 import uuid
+from datetime import datetime, timezone
 from types import TracebackType
 from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional, Type, Union
 
@@ -40,11 +50,15 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed, InvalidStatus, WebSocketException
 
-from ._base import API_PREFIX, _Config
+from ._base import API_PREFIX, AsyncHTTP, SyncHTTP, _Config
 from ._errors import APIConnectionError, APITimeoutError, FinesseError, make_status_error
+from .resources.realtime_sessions import AsyncDirectSessions, DirectSessions
+from .types import DirectSession
 
 __all__ = [
     "AsyncRealtime",
+    "Realtime",
+    "connect_direct",
     "RealtimeSession",
     "RealtimeContext",
     "RealtimeError",
@@ -61,6 +75,9 @@ SUBPROTOCOL = "finesse.v1"
 
 TokenProvider = Callable[[], Union[str, Awaitable[str]]]
 """Returns a fresh access token (``fin_tok_...``); may be async."""
+
+SessionProvider = Callable[[], Union[DirectSession, Awaitable[DirectSession]]]
+"""Returns a new direct session (``realtime.sessions.create``); may be async."""
 
 DEFAULT_OPEN_TIMEOUT = 60.0
 """Seconds to open a session. The service accepts the socket, then connects to the engine,
@@ -79,7 +96,9 @@ class RealtimeError(FinesseError):
             other voices), ``invalid_request`` (a parameter out of range), a ``task_failed``
             code. Whole session: ``insufficient_credits``, ``upstream_unavailable`` (the
             engine could not be reached), ``upstream_busy`` (it is at capacity),
-            ``upstream_error``, ``upstream_closed``, ``connection_lost``, ``token_spent``, ...
+            ``upstream_error``, ``upstream_closed``, ``connection_lost``, ``token_spent``,
+            ``session_spent``, ``session_expired``, ``unauthorized`` (a direct session's
+            token was refused), ...
         context_id: The context it applies to, or ``None`` for the whole session.
         close_code: The WebSocket close code, when the socket closed.
         retryable: Whether reconnecting and trying again can succeed.
@@ -120,10 +139,19 @@ class RealtimeError(FinesseError):
 _RETRYABLE_CLOSES = frozenset({1001, 1006, 1011, 1012, 1013, 4429})
 
 
-def _close_error(code: Optional[int], reason: str) -> Optional[RealtimeError]:
+def _close_error(code: Optional[int], reason: str, direct: bool = False) -> Optional[RealtimeError]:
     """The error a close code means for contexts still running, or ``None`` for a clean close."""
     if code == 1000:
         return None
+    if direct and code == 4401:
+        # A direct session's GPU closes 4401 when its token is invalid, already used or past
+        # connect_by: a client-side problem, fixed by creating a new session.
+        return RealtimeError(
+            "unauthorized",
+            "The session token was refused (invalid, already used, or past connect_by). "
+            "Create a new session.",
+            close_code=code,
+        )
     if code == 1008:
         return RealtimeError(reason or "policy_violation", reason, close_code=code)
     if code == 1009:
@@ -362,11 +390,22 @@ class RealtimeSession:
         open_timeout: float,
         access_token: Optional[str] = None,
         get_access_token: Optional[TokenProvider] = None,
+        session: Optional[DirectSession] = None,
+        get_session: Optional[SessionProvider] = None,
     ) -> None:
+        self._direct = session is not None or get_session is not None
+        if self._direct and (access_token or get_access_token):
+            raise FinesseError(
+                "Pass session / get_session or access_token / get_access_token, not both."
+            )
         self._config = config
-        self._access_token = access_token or config.access_token
+        self._access_token = None if self._direct else (access_token or config.access_token)
         self._get_access_token = get_access_token
         self._token_spent = False
+        self._session = session
+        self._get_session = get_session
+        self._session_spent = False
+        self._current: Optional[DirectSession] = None
         self._auto_reconnect = auto_reconnect
         self._open_timeout = open_timeout
         self._ws: Optional[ClientConnection] = None
@@ -382,7 +421,17 @@ class RealtimeSession:
 
     @property
     def url(self) -> str:
+        """Where the socket connects: the API's ``/stream``, or a direct session's GPU URL."""
+        if self._direct:
+            current = self._current or self._session
+            return current.url if current else ""
         return f"{self._config.ws_base_url}{API_PREFIX}/stream"
+
+    @property
+    def direct_session(self) -> Optional[DirectSession]:
+        """The direct session the socket runs on (its region and budget), or ``None`` when the
+        session goes through the API."""
+        return self._current
 
     @property
     def is_open(self) -> bool:
@@ -406,19 +455,25 @@ class RealtimeSession:
                 raise RealtimeError("session_closed", "This session was closed.")
             if self._opened_once and not self._auto_reconnect:
                 raise self._error or RealtimeError("connection_closed", "The session is closed.")
-            token = await self._next_token()
+            direct = await self._next_session() if self._direct else None
+            token = None if direct else await self._next_token()
             # A token replaces the key: it rides in the subprotocol list, the one place a
-            # browser can put a credential on a WebSocket handshake.
+            # browser can put a credential on a WebSocket handshake. A direct session's token
+            # does the same, and neither the key nor an access token goes to the GPU.
             dropped = {"Accept", "User-Agent"} | (
-                {"X-API-Key", "Authorization"} if token else set()
+                {"X-API-Key", "Authorization"} if token or direct else set()
             )
             headers = {k: v for k, v in self._config.headers.items() if k not in dropped}
             # Offered only with a token: a server that predates tokens selects no subprotocol,
             # which some clients treat as a failed handshake.
             subprotocols = [SUBPROTOCOL, token] if token else None
+            url = self.url
+            if direct:
+                subprotocols = [direct.protocol or SUBPROTOCOL, direct.token]
+                url = direct.url
             try:
                 ws = await connect(
-                    self.url,
+                    url,
                     additional_headers=headers,
                     subprotocols=subprotocols,  # type: ignore[arg-type]
                     user_agent_header=self._config.headers.get("User-Agent"),
@@ -432,7 +487,7 @@ class RealtimeSession:
                     r.status_code,
                     headers=list(r.headers.raw_items()),
                     content=bytes(r.body or b""),
-                    request=httpx.Request("GET", self.url),
+                    request=httpx.Request("GET", url),
                 )
                 raise make_status_error(response) from exc
             except (asyncio.TimeoutError, TimeoutError) as exc:
@@ -444,6 +499,10 @@ class RealtimeSession:
                 raise RealtimeError("session_closed", "This session was closed.")
             if token and token == self._access_token:
                 self._token_spent = True  # the handshake consumed the static token
+            if direct is not None:
+                if direct is self._session:
+                    self._session_spent = True
+                self._current = direct
             self._ws = ws
             self._pending_audio = None
             self._fatal = None
@@ -473,6 +532,32 @@ class RealtimeSession:
                 "get_access_token=... so a reconnect can fetch a fresh one.",
             )
         return None
+
+    async def _next_session(self) -> DirectSession:
+        """The direct session for the next handshake. Like a token, a static ``session`` is
+        used first; once a handshake has spent it, ``get_session`` supplies one per reconnect."""
+        if self._session is not None and not self._session_spent:
+            by = self._session.connect_by
+            if by is not None and by <= datetime.now(timezone.utc):
+                raise RealtimeError(
+                    "session_expired",
+                    "This direct session's connect_by has passed. Create a new session.",
+                )
+            return self._session
+        if self._get_session is not None:
+            s = self._get_session()
+            if inspect.isawaitable(s):
+                s = await s
+            if isinstance(s, dict):
+                s = DirectSession.model_validate(s)
+            if not isinstance(s, DirectSession) or not s.url or not s.token:
+                raise FinesseError("get_session must return a DirectSession with a url and token.")
+            return s
+        raise RealtimeError(
+            "session_spent",
+            "This direct session was used by an earlier connection. Pass get_session=... so a "
+            "reconnect can create a new one.",
+        )
 
     def context(
         self,
@@ -596,7 +681,9 @@ class RealtimeSession:
             raise (
                 self._error
                 or _close_error(
-                    exc.rcvd.code if exc.rcvd else None, exc.rcvd.reason if exc.rcvd else ""
+                    exc.rcvd.code if exc.rcvd else None,
+                    exc.rcvd.reason if exc.rcvd else "",
+                    self._direct,
                 )
                 or RealtimeError("connection_closed", "The session is closed.")
             ) from exc
@@ -622,7 +709,7 @@ class RealtimeSession:
                 if error.close_code is None:
                     error.close_code = ws.close_code
             else:
-                error = _close_error(ws.close_code, ws.close_reason or "")
+                error = _close_error(ws.close_code, ws.close_reason or "", self._direct)
             if error is None and self._contexts:
                 error = RealtimeError(
                     "connection_closed", "The session ended.", close_code=ws.close_code
@@ -737,11 +824,22 @@ def _text_frames(
     return frames
 
 
+class Realtime:
+    """``client.realtime`` on the sync client: create direct sessions. Realtime sockets need
+    :class:`AsyncFinesse` (or :func:`connect_direct`)."""
+
+    def __init__(self, http: SyncHTTP) -> None:
+        self.sessions = DirectSessions(http)
+
+
 class AsyncRealtime:
     """``client.realtime``: open realtime sessions."""
 
-    def __init__(self, config: _Config) -> None:
+    def __init__(self, config: _Config, http: Optional[AsyncHTTP] = None) -> None:
         self._config = config
+        if http is not None:
+            # Direct sessions: lower latency, straight to the GPU.
+            self.sessions = AsyncDirectSessions(http)
 
     def connect(
         self,
@@ -750,6 +848,8 @@ class AsyncRealtime:
         open_timeout: float = DEFAULT_OPEN_TIMEOUT,
         access_token: Optional[str] = None,
         get_access_token: Optional[TokenProvider] = None,
+        session: Optional[DirectSession] = None,
+        get_session: Optional[SessionProvider] = None,
     ) -> RealtimeSession:
         """Create a session; it opens on ``async with`` or first use.
 
@@ -759,6 +859,12 @@ class AsyncRealtime:
                 ``get_access_token``.
             get_access_token: Called for a fresh token before every (re)connect, e.g. a call
                 to your own backend that runs ``tokens.create``. May be async.
+            session: A direct session from ``realtime.sessions.create``: the socket runs
+                straight against the GPU. Single use, so pass ``get_session`` too if the
+                session should reconnect.
+            get_session: Called for a new direct session before every (re)connect without a
+                usable ``session``, e.g. ``lambda: client.realtime.sessions.create(...)``.
+                May be async.
         """
         return RealtimeSession(
             self._config,
@@ -766,4 +872,41 @@ class AsyncRealtime:
             open_timeout=open_timeout,
             access_token=access_token,
             get_access_token=get_access_token,
+            session=session,
+            get_session=get_session,
         )
+
+
+def connect_direct(
+    *,
+    session: Optional[DirectSession] = None,
+    get_session: Optional[SessionProvider] = None,
+    auto_reconnect: bool = True,
+    open_timeout: float = DEFAULT_OPEN_TIMEOUT,
+) -> RealtimeSession:
+    """A direct session without a client, for a device or process that holds no API key. Your
+    server creates the session (``realtime.sessions.create``) and hands it over;
+    ``get_session`` fetches a new one for each reconnect::
+
+        async with connect_direct(get_session=fetch_session_from_my_backend) as rt:
+            ...
+    """
+    if session is None and get_session is None:
+        raise FinesseError("connect_direct needs session=... or get_session=....")
+    # A direct session authenticates with its own token, so this config holds no credential
+    # the socket could use: the placeholder satisfies the constructor and is never sent.
+    config = _Config(
+        api_key=None,
+        base_url=None,
+        timeout=None,
+        max_retries=0,
+        default_headers=None,
+        access_token="direct-session-only",
+    )
+    return RealtimeSession(
+        config,
+        auto_reconnect=auto_reconnect,
+        open_timeout=open_timeout,
+        session=session,
+        get_session=get_session,
+    )

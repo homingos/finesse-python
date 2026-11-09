@@ -36,6 +36,7 @@ realtime to voice agents, with a few lines of code.
 - [Text to speech](#text-to-speech)
 - [Streaming speech](#streaming-speech)
 - [Realtime](#realtime)
+- [Direct sessions (lowest latency)](#direct-sessions-lowest-latency)
 - [Short-lived tokens](#short-lived-tokens)
 - [Async usage](#async-usage)
 - [Which method should I use?](#which-method-should-i-use)
@@ -278,6 +279,57 @@ A turn that fails raises `RealtimeError` (for example `code == "voice_not_found"
 - The service accepts frames of up to 1 MiB. The SDK splits longer text across several frames.
 - Text is billed per character as it is sent. A session reserves credits in blocks of up to
   1,000 characters and returns what it doesn't use when it ends.
+
+## Direct sessions (lowest latency)
+
+A direct session runs the realtime socket **straight against the synthesis GPU** in your
+account's server region, so audio never passes through the API and each sentence starts sooner.
+Contexts, events, cancel and limits work exactly as above.
+
+```python
+from flam_finesse import AsyncFinesse
+
+client = AsyncFinesse()
+
+# A new session for the first connection and for every reconnect.
+async with client.realtime.connect(
+    get_session=lambda: client.realtime.sessions.create(voice_ids=[VOICE_ID])
+) as rt:
+    async for event in rt.say(voice_id=VOICE_ID, text="Hello, straight from the GPU."):
+        ...
+    print(rt.direct_session.region)  # "ap-south" or "us-east"
+```
+
+To run the socket somewhere that holds no API key (a device, a worker), create the session on
+your server and hand it over; `connect_direct` opens it without a client:
+
+```python
+# On your server (the sync client works too)
+session = Finesse().realtime.sessions.create(voice_ids=[VOICE_ID])
+return session.model_dump(mode="json")
+
+# On the device
+from flam_finesse import DirectSession, connect_direct
+
+async def fetch_session() -> DirectSession:
+    return DirectSession.model_validate(await my_backend.post("/finesse-session"))
+
+async with connect_direct(get_session=fetch_session) as rt:
+    ...
+```
+
+How it differs from a session through the API:
+
+- **Voices:** only the `voice_ids` you list (1-16). A context for any other voice fails with
+  `voice_not_found`; the session keeps running.
+- **Credits:** `budget_chars` (default 20,000) is reserved when the session is created and the
+  rest is returned when it ends. Going past it ends the session with `insufficient_credits`.
+- **Lifetime:** connect within 60 s of creating it (`connect_by`), and a session runs at most an
+  hour (`ttl_seconds`), then ends with `session_ended`.
+- **Single use:** the session's token works for one connection. With `session=` alone, a
+  reconnect raises `RealtimeError(code="session_spent")`; pass `get_session` so each reconnect
+  gets a new session. A refused token raises `code == "unauthorized"`.
+- **Region:** set by the account that owns the API key, not per request.
 
 ## Short-lived tokens
 
