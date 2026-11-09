@@ -7,7 +7,7 @@ import httpx
 
 from ._base import DEFAULT_MAX_RETRIES, AsyncHTTP, SyncHTTP, TimeoutTypes, _Config
 from ._raw import RawClient
-from .realtime import AsyncRealtime
+from .realtime import AsyncRealtime, Realtime
 from .resources import (
     AsyncJobs,
     AsyncSpeech,
@@ -51,6 +51,7 @@ class Finesse:
     jobs: Jobs
     speech: Speech
     tokens: Tokens
+    realtime: Realtime
 
     def __init__(
         self,
@@ -82,6 +83,7 @@ class Finesse:
             resources["speech"],
             resources["tokens"],
         )
+        self.realtime = Realtime(self._http)
 
     def with_options(
         self,
@@ -169,7 +171,7 @@ class AsyncFinesse:
             resources["speech"],
             resources["tokens"],
         )
-        self.realtime = AsyncRealtime(self._http.config)
+        self.realtime = AsyncRealtime(self._http.config, self._http)
 
     def with_options(
         self,

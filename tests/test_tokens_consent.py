@@ -127,3 +127,35 @@ def test_new_codes(make_client, status: int, code: str, cls: type) -> None:
     e = info.value
     assert e.code == code and e.retry_after == 2.0
     assert e.request_id == "req_b"  # taken from the body when the header is absent
+
+
+# -- direct sessions -----------------------------------------------------------------------
+
+SESSION = {
+    "session_id": "4f1c2a9e8b7d6c5b4a3f2e1d",
+    "url": "wss://gpu.example/v1/stream",
+    "protocol": "finesse.v1",
+    "token": "ft1.abc",
+    "connect_by": "2026-11-09T10:15:00Z",
+    "ttl_seconds": 3600,
+    "budget_chars": 5000,
+    "region": "ap-south",
+    "voices": [VOICE["id"]],
+}
+
+
+def test_create_direct_session(make_client) -> None:
+    client, rec = make_client(envelope(SESSION, 201))
+    s = client.realtime.sessions.create(voice_ids=[VOICE["id"]], budget_chars=5000)
+    assert rec.last.method == "POST"
+    assert rec.last.url.path == "/flam-voice-svc/api/v1/public/realtime/sessions"
+    assert rec.json() == {"voice_ids": [VOICE["id"]], "budget_chars": 5000}
+    assert (s.token, s.region, s.budget_chars) == ("ft1.abc", "ap-south", 5000)
+    assert s.connect_by is not None and s.connect_by.year == 2026
+
+
+async def test_async_create_direct_session(make_async_client) -> None:
+    client, rec = make_async_client(envelope(SESSION, 201))
+    s = await client.realtime.sessions.create(voice_ids=[VOICE["id"]])
+    assert rec.json() == {"voice_ids": [VOICE["id"]]}
+    assert s.url == SESSION["url"]

@@ -799,3 +799,151 @@ async def test_long_first_text_starts_with_its_first_piece() -> None:
     assert all(m["type"] == "task_continue" and "voice_id" not in m for m in frames[1:])
     assert [m["finalize"] for m in frames] == [False] * (len(frames) - 1) + [True]
     assert "".join(m["text"] for m in frames) == text
+
+
+# -- direct sessions -----------------------------------------------------------------------
+
+
+def _direct(port: int, token: str, connect_by: Optional[str] = None) -> ff.DirectSession:
+    from datetime import datetime, timedelta, timezone
+
+    by = connect_by or (datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat()
+    return ff.DirectSession.model_validate(
+        {
+            "session_id": "4f1c2a9e8b7d6c5b4a3f2e1d",
+            "url": f"ws://127.0.0.1:{port}/v1/stream",
+            "protocol": "finesse.v1",
+            "token": token,
+            "connect_by": by,
+            "ttl_seconds": 3600,
+            "budget_chars": 20000,
+            "region": "ap-south",
+            "voices": [VID],
+        }
+    )
+
+
+@contextlib.asynccontextmanager
+async def gpu(engine: Engine) -> AsyncIterator[int]:
+    async with serve(engine.handler, "127.0.0.1", 0) as server:
+        yield server.sockets[0].getsockname()[1]
+
+
+def _drop_first_task(engine: Engine) -> None:
+    first = True
+
+    async def drop_once(ws: ServerConnection, msg: Dict[str, Any]) -> None:
+        nonlocal first
+        if first and msg["type"] == "task_start":
+            first = False
+            ws.transport.abort()
+            return
+        await Engine.on_message(engine, ws, msg)
+
+    engine.on_message = drop_once  # type: ignore[method-assign]
+
+
+async def test_direct_session_connects_to_its_url_without_the_key() -> None:
+    engine = Engine()
+    async with running(engine) as client, gpu(engine) as port:
+        s = _direct(port, "ft1.one")
+        async with client.realtime.connect(session=s) as rt:
+            events = await collect(rt.say(voice_id=VID, text="hi"))
+            assert events[-1].type == "task_done"
+            assert rt.direct_session is s
+    h = engine.headers[0]
+    assert engine.paths[0] == "/v1/stream"
+    assert h["Sec-WebSocket-Protocol"] == "finesse.v1, ft1.one"
+    assert "X-API-Key" not in h and "Authorization" not in h
+    assert "ft1.one" not in repr(s)
+
+
+async def test_spent_direct_session_needs_get_session() -> None:
+    engine = Engine()
+    _drop_first_task(engine)
+    async with (
+        running(engine) as client,
+        gpu(engine) as port,
+        client.realtime.connect(session=_direct(port, "ft1.a")) as rt,
+    ):
+        with pytest.raises(ff.RealtimeError):
+            await collect(rt.say(voice_id=VID, text="x"))
+        with pytest.raises(ff.RealtimeError) as info:
+            await collect(rt.say(voice_id=VID, text="again"))
+        assert info.value.code == "session_spent"
+
+
+async def test_get_session_supplies_a_new_session_per_reconnect() -> None:
+    engine = Engine()
+    _drop_first_task(engine)
+    issued: List[str] = []
+    async with running(engine) as client, gpu(engine) as port:
+
+        async def fresh() -> ff.DirectSession:
+            issued.append(f"ft1.fresh{len(issued)}")
+            return _direct(port, issued[-1])
+
+        async with client.realtime.connect(
+            session=_direct(port, "ft1.first"), get_session=fresh
+        ) as rt:
+            with pytest.raises(ff.RealtimeError):
+                await collect(rt.say(voice_id=VID, text="x"))
+            events = await collect(rt.say(voice_id=VID, text="again"))
+            assert events[-1].type == "task_done"
+            assert rt.direct_session is not None and rt.direct_session.token == "ft1.fresh0"
+    assert [h["Sec-WebSocket-Protocol"] for h in engine.headers] == [
+        "finesse.v1, ft1.first",
+        "finesse.v1, ft1.fresh0",
+    ]
+
+
+async def test_direct_session_past_connect_by_is_not_dialed() -> None:
+    engine = Engine()
+    async with running(engine) as client, gpu(engine) as port:
+        old = _direct(port, "ft1.old", connect_by="2020-01-01T00:00:00Z")
+        with pytest.raises(ff.RealtimeError) as info:
+            async with client.realtime.connect(session=old):
+                pass
+        assert info.value.code == "session_expired"
+    assert engine.connections == 0
+
+
+async def test_direct_4401_is_unauthorized_not_a_service_fault() -> None:
+    engine = Engine()
+
+    async def refuse(ws: ServerConnection, msg: Dict[str, Any]) -> None:
+        await ws.close(4401, "unauthorized")
+
+    engine.on_message = refuse  # type: ignore[method-assign]
+    async with (
+        running(engine) as client,
+        gpu(engine) as port,
+        client.realtime.connect(session=_direct(port, "ft1.used")) as rt,
+    ):
+        with pytest.raises(ff.RealtimeError) as info:
+            await collect(rt.say(voice_id=VID, text="x"))
+    err = info.value
+    assert (err.code, err.close_code, err.retryable) == ("unauthorized", 4401, False)
+
+
+async def test_connect_direct_needs_no_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("FINESSE_API_KEY", raising=False)
+    engine = Engine()
+    async with gpu(engine) as port:
+
+        def fetch() -> ff.DirectSession:
+            return _direct(port, "ft1.device")
+
+        async with ff.connect_direct(get_session=fetch) as rt:
+            events = await collect(rt.say(voice_id=VID, text="hi"))
+            assert events[-1].type == "task_done"
+    h = engine.headers[0]
+    assert h["Sec-WebSocket-Protocol"] == "finesse.v1, ft1.device"
+    assert "Authorization" not in h and "X-API-Key" not in h
+
+
+def test_session_and_access_token_together_is_an_error() -> None:
+    client = AsyncFinesse(api_key="flv_test", base_url="http://127.0.0.1:1")
+    s = _direct(1, "ft1.x")
+    with pytest.raises(ff.FinesseError, match="not both"):
+        client.realtime.connect(session=s, access_token="fin_tok_x")

@@ -37,6 +37,7 @@ from .realtime import (
     TaskCancelled,
     TaskDone,
     TaskStarted,
+    connect_direct,
 )
 from .resources import AsyncSpeechStream, SpeechStream
 from .types import (
@@ -45,6 +46,7 @@ from .types import (
     AudioChunk,
     CloneJob,
     CloneResult,
+    DirectSession,
     StreamDone,
     Voice,
     VoiceSettings,
@@ -62,6 +64,7 @@ __all__ = [
     "CloneJob",
     "CloneResult",
     "AccessToken",
+    "DirectSession",
     "Audio",
     "RawResponse",
     "AudioChunk",
@@ -86,6 +89,7 @@ __all__ = [
     "CloneFailedError",
     "CloneTimeoutError",
     "RealtimeSession",
+    "connect_direct",
     "RealtimeContext",
     "RealtimeError",
     "RealtimeEvent",
