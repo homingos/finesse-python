@@ -51,7 +51,13 @@ from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed, InvalidStatus, WebSocketException
 
 from ._base import API_PREFIX, AsyncHTTP, SyncHTTP, _Config
-from ._errors import APIConnectionError, APITimeoutError, FinesseError, make_status_error
+from ._errors import (
+    APIConnectionError,
+    APIStatusError,
+    APITimeoutError,
+    FinesseError,
+    make_status_error,
+)
 from .resources.realtime_sessions import AsyncDirectSessions, DirectSessions
 from .types import DirectSession
 
@@ -83,6 +89,8 @@ DEFAULT_OPEN_TIMEOUT = 60.0
 """Seconds to open a session. The service accepts the socket, then connects to the engine,
 which takes longer when the engine is cold."""
 _CLOSE_TIMEOUT = 5.0
+# Seconds between handshakes while a direct session's GPU region starts a container (503).
+_COLD_START_BACKOFF = (0.25, 0.5, 1.0, 2.0)
 _MAX_FRAME = 16 * 1024 * 1024
 _MAX_CLIENT_FRAME = 1024 * 1024
 """The service closes the socket (1009) on a client frame over 1 MiB, ending every context."""
@@ -471,29 +479,10 @@ class RealtimeSession:
             if direct:
                 subprotocols = [direct.protocol or SUBPROTOCOL, direct.token]
                 url = direct.url
-            try:
-                ws = await connect(
-                    url,
-                    additional_headers=headers,
-                    subprotocols=subprotocols,  # type: ignore[arg-type]
-                    user_agent_header=self._config.headers.get("User-Agent"),
-                    open_timeout=self._open_timeout,
-                    max_size=_MAX_FRAME,
-                    compression=None,
-                )
-            except InvalidStatus as exc:
-                r = exc.response
-                response = httpx.Response(
-                    r.status_code,
-                    headers=list(r.headers.raw_items()),
-                    content=bytes(r.body or b""),
-                    request=httpx.Request("GET", url),
-                )
-                raise make_status_error(response) from exc
-            except (asyncio.TimeoutError, TimeoutError) as exc:
-                raise APITimeoutError() from exc
-            except (OSError, WebSocketException) as exc:
-                raise APIConnectionError(str(exc) or "Connection error.") from exc
+            if direct is None:
+                ws = await self._handshake(url, headers, subprotocols, self._open_timeout)
+            else:
+                ws = await self._handshake_direct(url, headers, subprotocols, direct)
             if self._closed:  # close() ran while we were connecting
                 await ws.close()
                 raise RealtimeError("session_closed", "This session was closed.")
@@ -509,6 +498,72 @@ class RealtimeSession:
             self._error = None
             self._opened_once = True
             self._reader = asyncio.ensure_future(self._read(ws))
+
+    async def _handshake_direct(
+        self,
+        url: str,
+        headers: Dict[str, str],
+        subprotocols: Optional[List[str]],
+        direct: DirectSession,
+    ) -> ClientConnection:
+        """Dial a direct session. A GPU region with no running container refuses the handshake
+        with 503 instead of waiting for one to start (a cold start can take about a minute), so
+        a 503 is retried with backoff on the same session (the GPU never saw its token) until
+        the open timeout or the session's ``connect_by``, whichever comes first."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._open_timeout
+        if direct.connect_by is not None:
+            left = (direct.connect_by - datetime.now(timezone.utc)).total_seconds()
+            deadline = min(deadline, loop.time() + left)
+        attempt = 0
+        while True:
+            try:
+                return await self._handshake(
+                    url, headers, subprotocols, max(deadline - loop.time(), 0.001)
+                )
+            except APIStatusError as exc:
+                if exc.status_code != 503:
+                    raise
+                wait = _COLD_START_BACKOFF[min(attempt, len(_COLD_START_BACKOFF) - 1)]
+                if self._closed:
+                    raise RealtimeError("session_closed", "This session was closed.") from exc
+                if loop.time() + wait >= deadline:
+                    raise
+                await asyncio.sleep(wait)
+                attempt += 1
+                if self._closed:
+                    raise RealtimeError("session_closed", "This session was closed.") from exc
+
+    async def _handshake(
+        self,
+        url: str,
+        headers: Dict[str, str],
+        subprotocols: Optional[List[str]],
+        timeout: float,
+    ) -> ClientConnection:
+        try:
+            return await connect(
+                url,
+                additional_headers=headers,
+                subprotocols=subprotocols,  # type: ignore[arg-type]
+                user_agent_header=self._config.headers.get("User-Agent"),
+                open_timeout=timeout,
+                max_size=_MAX_FRAME,
+                compression=None,
+            )
+        except InvalidStatus as exc:
+            r = exc.response
+            response = httpx.Response(
+                r.status_code,
+                headers=list(r.headers.raw_items()),
+                content=bytes(r.body or b""),
+                request=httpx.Request("GET", url),
+            )
+            raise make_status_error(response) from exc
+        except (asyncio.TimeoutError, TimeoutError) as exc:
+            raise APITimeoutError() from exc
+        except (OSError, WebSocketException) as exc:
+            raise APIConnectionError(str(exc) or "Connection error.") from exc
 
     async def _next_token(self) -> Optional[str]:
         """The token for the next handshake, or ``None`` to authenticate with the key.

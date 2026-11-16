@@ -942,6 +942,74 @@ async def test_connect_direct_needs_no_api_key(monkeypatch: pytest.MonkeyPatch) 
     assert "Authorization" not in h and "X-API-Key" not in h
 
 
+class _ColdGpu:
+    """A GPU region with no running container: it answers 503 until one starts."""
+
+    def __init__(self, refusals: float) -> None:
+        self.refusals = refusals
+        self.seen: List[str] = []
+
+    def process_request(self, conn: ServerConnection, request: Request) -> Optional[Response]:
+        self.seen.append(request.headers.get("Sec-WebSocket-Protocol", ""))
+        if len(self.seen) <= self.refusals:
+            return reject(503, {"error": "no upstreams available"})(conn, request)
+        return None
+
+
+@contextlib.asynccontextmanager
+async def cold_gpu(engine: Engine, cold: _ColdGpu) -> AsyncIterator[int]:
+    async with serve(engine.handler, "127.0.0.1", 0, process_request=cold.process_request) as s:
+        yield s.sockets[0].getsockname()[1]
+
+
+async def test_direct_retries_a_cold_gpu_on_the_same_session() -> None:
+    engine, cold = Engine(), _ColdGpu(2)
+    minted: List[str] = []
+    async with running(engine) as client, cold_gpu(engine, cold) as port:
+
+        def fresh() -> ff.DirectSession:
+            minted.append(f"ft1.s{len(minted)}")
+            return _direct(port, minted[-1])
+
+        async with client.realtime.connect(get_session=fresh) as rt:
+            events = await collect(rt.say(voice_id=VID, text="hi"))
+            assert events[-1].type == "task_done"
+    assert minted == ["ft1.s0"]  # no extra sessions: each holds a concurrency slot
+    assert cold.seen == ["finesse.v1, ft1.s0"] * 3
+
+
+async def test_direct_gives_up_on_a_gpu_that_stays_cold() -> None:
+    engine, cold = Engine(), _ColdGpu(float("inf"))
+    async with running(engine) as client, cold_gpu(engine, cold) as port:
+        with pytest.raises(ff.InternalServerError) as info:
+            async with client.realtime.connect(session=_direct(port, "ft1.cold"), open_timeout=0.6):
+                pass
+    assert info.value.status_code == 503
+    assert len(cold.seen) > 1
+    assert engine.connections == 0
+
+
+async def test_direct_stops_retrying_when_closed() -> None:
+    engine, cold = Engine(), _ColdGpu(float("inf"))
+    async with running(engine) as client, cold_gpu(engine, cold) as port:
+        rt = client.realtime.connect(session=_direct(port, "ft1.c"))
+        opening = asyncio.ensure_future(rt.open())
+        await asyncio.sleep(0.1)
+        await rt.close()
+        with pytest.raises(ff.RealtimeError) as info:
+            await opening
+    assert info.value.code == "session_closed"
+
+
+async def test_no_retry_of_a_503_through_the_api() -> None:
+    engine, cold = Engine(), _ColdGpu(float("inf"))
+    async with running(engine, process_request=cold.process_request) as client:
+        with pytest.raises(ff.InternalServerError):
+            async with client.realtime.connect():
+                pass
+    assert len(cold.seen) == 1
+
+
 def test_session_and_access_token_together_is_an_error() -> None:
     client = AsyncFinesse(api_key="flv_test", base_url="http://127.0.0.1:1")
     s = _direct(1, "ft1.x")

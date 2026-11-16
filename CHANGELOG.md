@@ -10,6 +10,9 @@
   token was invalid, already used or past `connect_by`), not `service_auth_failed`. Reusing a
   spent session raises `session_spent`; one past `connect_by` raises `session_expired` without
   dialing.
+- Direct sessions survive a cold GPU: a region with no running container refuses the
+  handshake with `503` until one starts, and connecting now retries it with backoff on the same
+  session (no extra session, so no extra concurrency slot) until `open_timeout` or `connect_by`.
 
 - `output_format="mulaw"` (raw G.711 µ-law) for telephony, with `sample_rate=8000`, on speech
   and realtime contexts. 8 kHz is now produced as asked; the README shows Twilio Media Streams.
