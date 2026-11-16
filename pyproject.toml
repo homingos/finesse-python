@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling>=1.24"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
@@ -8,10 +8,17 @@ dynamic = ["version"]
 description = "Python SDK for the Finesse voice API: voice cloning, text-to-speech and realtime streaming."
 readme = "README.md"
 requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 authors = [{ name = "Flam" }]
 keywords = ["finesse", "flam", "tts", "text-to-speech", "voice", "voice-cloning", "realtime"]
 classifiers = [
+  "Development Status :: 4 - Beta",
   "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Programming Language :: Python :: 3 :: Only",
   "Typing :: Typed",
   "Intended Audience :: Developers",
@@ -23,6 +30,12 @@ dependencies = [
   "typing-extensions>=4.7",
   "websockets>=14",
 ]
+
+[project.urls]
+Homepage = "https://finesse.flamapp.ai"
+Documentation = "https://docs.finesse.flamapp.ai"
+Repository = "https://github.com/homingos/finesse-python"
+Changelog = "https://github.com/homingos/finesse-python/blob/main/CHANGELOG.md"
 
 [dependency-groups]
 dev = [
@@ -37,6 +50,10 @@ path = "src/flam_finesse/_version.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/flam_finesse"]
+
+# Only what a source build needs; local tool files and README images stay out.
+[tool.hatch.build.targets.sdist]
+include = ["src/", "tests/", "examples/", "README.md", "CHANGELOG.md", "LICENSE", "pyproject.toml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

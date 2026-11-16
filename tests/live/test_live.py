@@ -1,7 +1,7 @@
 """Contract tests against a real Finesse API. Skipped unless FINESSE_LIVE=1.
 
     FINESSE_LIVE=1 FINESSE_API_KEY=flv_... \
-    FINESSE_BASE_URL=https://finesse.example.test uv run pytest tests/live -v
+    FINESSE_BASE_URL=<non-production API URL> uv run pytest tests/live -v
 
 They synthesize a few short sentences (billed per character) and open realtime sessions. They
 refuse to run against production unless FINESSE_LIVE_ALLOW_PROD=1.

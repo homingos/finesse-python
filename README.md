@@ -1,13 +1,15 @@
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="./.github/assets/banner-python-dark.png">
-  <source media="(prefers-color-scheme: light)" srcset="./.github/assets/banner-python-light.png">
-  <img alt="Finesse by Flam: Python SDK for voice cloning, text-to-speech and realtime streaming" src="./.github/assets/banner-python-light.png" width="100%">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/homingos/finesse-python/main/.github/assets/banner-python-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/homingos/finesse-python/main/.github/assets/banner-python-light.png">
+  <img alt="Finesse by Flam: Python SDK for voice cloning, text-to-speech and realtime streaming" src="https://raw.githubusercontent.com/homingos/finesse-python/main/.github/assets/banner-python-light.png" width="100%">
 </picture>
 
 <p>
+  <a href="https://pypi.org/project/flam-finesse/"><img alt="PyPI version" src="https://img.shields.io/pypi/v/flam-finesse?style=flat&labelColor=14151A&color=2547F0"></a>
   <img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-14151A?style=flat&labelColor=14151A&color=2547F0">
   <img alt="Typed" src="https://img.shields.io/badge/types-included-14151A?style=flat&labelColor=14151A&color=2547F0">
-  <img alt="Status: private preview" src="https://img.shields.io/badge/status-private%20preview-14151A?style=flat&labelColor=14151A&color=63656A">
+  <img alt="Status: beta" src="https://img.shields.io/badge/status-beta-14151A?style=flat&labelColor=14151A&color=63656A">
+  <a href="https://github.com/homingos/finesse-python/blob/main/LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-14151A?style=flat&labelColor=14151A&color=63656A"></a>
 </p>
 
 # Finesse Python SDK
@@ -21,10 +23,10 @@ realtime to voice agents, with a few lines of code.
   on barge-in.
 - **Safe by default**: retries that never double-bill, typed errors, timeouts.
 
-**[Documentation](https://finesse.flamapp.ai/guides/overview)** ·
-**[API reference](https://finesse.flamapp.ai/voice-api/list-voices)** ·
+**[Documentation](https://docs.finesse.flamapp.ai/introduction)** ·
+**[API reference](https://docs.finesse.flamapp.ai/voice-api/list-voices)** ·
 **[Dashboard](https://finesse.flamapp.ai/dashboard)** ·
-**[Changelog](./CHANGELOG.md)**
+**[Changelog](https://github.com/homingos/finesse-python/blob/main/CHANGELOG.md)**
 
 ## Contents
 
@@ -51,15 +53,13 @@ realtime to voice agents, with a few lines of code.
 
 ## Installation
 
-The SDK is in private preview, so install it from GitHub (you need access to the repository):
-
 ```sh
-pip install "git+ssh://git@github.com/homingos/finesse-python.git"
+pip install flam-finesse
 # or
-uv add "git+ssh://git@github.com/homingos/finesse-python.git"
+uv add flam-finesse
 ```
 
-Once it is published this becomes `pip install flam-finesse`. The import name is `flam_finesse`.
+The package is `flam-finesse`; the import name is `flam_finesse`.
 
 ## Get an API key
 
@@ -75,7 +75,7 @@ export FINESSE_API_KEY="flv_..."
 Keep the key on your server. Anyone who has it can spend your workspace's credits.
 
 <p align="center">
-  <img alt="The API Keys page in the Finesse dashboard: name a key, press Create key, and copy it once" src="./.github/assets/api-keys.svg" width="100%">
+  <img alt="The API Keys page in the Finesse dashboard: name a key, press Create key, and copy it once" src="https://raw.githubusercontent.com/homingos/finesse-python/main/.github/assets/api-keys.svg" width="100%">
 </p>
 
 ## Quickstart
@@ -118,7 +118,7 @@ print(page.total, page.has_more, [v.name for v in page.voices])
 
 A voice can speak once `voice.status == "ready"` (`voice.is_ready`). Its `alias` (for example
 `narrator`) also works as the `voice` on the
-[OpenAI-compatible endpoint](https://finesse.flamapp.ai/voice-api/openai-compatible).
+[OpenAI-compatible endpoint](https://docs.finesse.flamapp.ai/voice-api/openai-compatible).
 
 ## Clone a voice
 
@@ -204,7 +204,7 @@ send text as it is produced and get audio back as fast as the engine makes it. E
 speech runs in a **context**, and a session can run several contexts at once.
 
 <p align="center">
-  <img alt="Two contexts on one WebSocket session: text goes out as task_start and task_continue; audio comes back per context; cancelling a context drops the audio still in flight" src="./.github/assets/realtime.svg" width="100%">
+  <img alt="Two contexts on one WebSocket session: text goes out as task_start and task_continue; audio comes back per context; cancelling a context drops the audio still in flight" src="https://raw.githubusercontent.com/homingos/finesse-python/main/.github/assets/realtime.svg" width="100%">
 </p>
 
 Realtime uses the async client:
@@ -600,8 +600,8 @@ client = Finesse(default_headers={"X-Finesse-Client": "my-app/1.0.0"})
 
 ## Examples
 
-Runnable scripts are in [`examples/`](./examples): [`speak.py`](./examples/speak.py),
-[`clone.py`](./examples/clone.py) and [`realtime.py`](./examples/realtime.py).
+Runnable scripts are in [`examples/`](https://github.com/homingos/finesse-python/tree/main/examples): [`speak.py`](https://github.com/homingos/finesse-python/blob/main/examples/speak.py),
+[`clone.py`](https://github.com/homingos/finesse-python/blob/main/examples/clone.py) and [`realtime.py`](https://github.com/homingos/finesse-python/blob/main/examples/realtime.py).
 
 ## Requirements
 
@@ -610,7 +610,7 @@ Python 3.10 or newer. Dependencies: `httpx`, `pydantic` (v2) and `websockets` (1
 ## Versioning
 
 The SDK follows [semantic versioning](https://semver.org). Before 1.0, minor versions may
-include breaking changes; they are listed in the [changelog](./CHANGELOG.md).
+include breaking changes; they are listed in the [changelog](https://github.com/homingos/finesse-python/blob/main/CHANGELOG.md).
 
 ```python
 import flam_finesse

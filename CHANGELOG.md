@@ -1,6 +1,9 @@
 # Changelog
 
-## 0.1.1 (unreleased)
+## 0.1.1
+
+- First release on PyPI, as `flam-finesse` (`pip install flam-finesse`), under the Apache-2.0
+  license.
 
 - Direct realtime sessions: `realtime.sessions.create(voice_ids=..., budget_chars=...)` (sync and
   async) and `realtime.connect(session=...)` / `get_session=...` run the socket straight against
@@ -34,7 +37,7 @@
 - Docs: `num_step` is 1-32, `sample_rate` 8000-48000; clone clips need at least 10 s and
   `ref_text` at most 4,000 characters; media URLs may be short-lived signed URLs.
 
-## 0.1.0 (unreleased)
+## 0.1.0 (not published; included in 0.1.1)
 
 - Sync and async clients: voices, cloning with job waiting, one-shot and streamed speech.
 - Realtime WebSocket sessions (async): concurrent contexts, streamed text, cancel, reconnect.
